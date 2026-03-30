@@ -1,0 +1,56 @@
+# .repomixignore — Repomix Exclusion Rules
+# Excludes large binaries, credentials, and ephemeral content
+# to keep context payloads within Tier 1/3 context windows (8k–32k tokens).
+# See DECISION 5 in KEY_DECISION_LOG.md.
+
+# Credentials and secrets (Ground Rule — never in context)
+.env
+*.env
+*credentials*.json
+*service_account*.json
+*oauth*.json
+
+# Image files (large binaries — Vision Agent receives these via Drive API, not Repomix)
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.bmp
+*.tiff
+*.tif
+*.heic
+*.heif
+
+# Google Drive payloads (downloaded to working/cache — never include in repo map)
+working/cache/
+working/downloads/
+
+# Ephemeral session scratch space (provisional — not source of truth)
+working/
+
+# Python virtual environment and cache
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Test coverage and build artifacts
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# IDE metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db

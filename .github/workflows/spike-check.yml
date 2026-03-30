@@ -1,0 +1,70 @@
+name: Spike Done-Lock
+
+# Enforces Ground Rule 7: spike issues cannot reach Done without
+# a linked formalization issue that has itself reached "In Review".
+# Runs when any issue is closed.
+
+on:
+  issues:
+    types: [closed]
+
+jobs:
+  spike-check:
+    name: Block spike issue closure without formalization
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check for spike label
+        id: check-spike
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issue = context.payload.issue;
+            const labels = issue.labels.map(l => l.name);
+
+            // Only enforce on issues with the 'spike' label
+            if (!labels.includes('spike')) {
+              console.log('Not a spike issue — no enforcement needed.');
+              return;
+            }
+
+            console.log(`Spike issue #${issue.number} closed — checking for formalization link.`);
+
+            // Search the issue body and comments for a linked formalization issue.
+            // Acceptable link patterns: "Closes #X", "Formalizes #X", "formalization: #X"
+            const body = issue.body || '';
+            const linkPattern = /(?:closes|formalizes|formalization[:\s]+)\s*#(\d+)/gi;
+            const matches = [...body.matchAll(linkPattern)];
+
+            if (matches.length === 0) {
+              // No formalization link found — reopen and comment.
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: [
+                  '🚫 **Spike Done-Lock (Ground Rule 7)**',
+                  '',
+                  'This issue carries the `spike` label and cannot reach Done without a linked formalization issue.',
+                  '',
+                  'To close this spike:',
+                  '1. Create a standard templated execution issue to formalize the code.',
+                  '2. Reference it in this issue body: `Formalizes #<issue-number>`',
+                  '3. Ensure the formalization issue reaches **In Review** before closing this spike.',
+                  '',
+                  'This issue has been automatically reopened.'
+                ].join('\n')
+              });
+
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'open'
+              });
+
+              core.setFailed(`Spike issue #${issue.number} closed without a formalization link. Reopened.`);
+            } else {
+              console.log(`Formalization link found: ${matches.map(m => '#' + m[1]).join(', ')}. Spike closure permitted.`);
+            }

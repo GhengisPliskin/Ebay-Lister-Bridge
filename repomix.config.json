@@ -1,0 +1,38 @@
+{
+  "output": {
+    "filePath": "repo-map.xml",
+    "style": "xml",
+    "showLineNumbers": true,
+    "copyToClipboard": false
+  },
+  "include": [
+    "src/**/*.py",
+    "tests/**/*.py",
+    "docs/**/*.md",
+    "*.md",
+    "*.txt",
+    "*.json",
+    "*.yml",
+    ".github/**/*.yml"
+  ],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      ".env",
+      "*.env",
+      "*credentials*.json",
+      "*service_account*.json",
+      "working/cache/**",
+      "working/downloads/**",
+      "**/__pycache__/**",
+      "**/*.pyc",
+      "venv/**",
+      ".venv/**",
+      "repo-map.xml"
+    ]
+  },
+  "security": {
+    "enableSecurityCheck": true
+  }
+}
