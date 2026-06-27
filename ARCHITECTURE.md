@@ -38,14 +38,25 @@ The system is a Python-based CLI application with four components:
 ```text
 lister-bridge/
 ├── src/
+│   ├── contracts/              # FROZEN pydantic data contracts (Phase 1 deliverable)
+│   │   ├── __init__.py          # Single import surface (re-exports all models)
+│   │   ├── vision.py            # VisionAgentOutput (Vision -> Margin-Guard)
+│   │   ├── pricing.py           # MarginGuardOutput + ActiveCompRange
+│   │   ├── ebay.py              # ListingPayload + REST bodies + result shapes
+│   │   └── state.py             # ItemRecord / ItemStatus / TokenCacheRecord
 │   ├── core/
-│   │   ├── orchestrator.py      # Main CLI loop and Drive API integration
-│   │   └── drive_fetcher.py     # Handles Google Drive IO
+│   │   ├── orchestrator.py      # Sequencing, per-item state, context flush (stub)
+│   │   ├── state_store.py       # SQLite dedup/resume + token cache (stub)
+│   │   └── drive_fetcher.py     # Google Drive IO (built; pending recursion+pagination)
 │   ├── ai/
-│   │   ├── vision_agent.py      # High-res image ingestion & Gemini extraction
-│   │   └── margin_guard.py      # Pricing logic and market analysis
+│   │   ├── provider.py          # Swappable AI provider interface (stub; Gemini default)
+│   │   ├── vision_agent.py      # Gemini extraction -> VisionAgentOutput (stub)
+│   │   └── margin_guard.py      # Active-comp + human + floor pricing (stub)
 │   └── api/
-│       └── ebay_graphql.py      # Formats and posts startListingPreviewsCreation
+│       ├── ebay_auth.py         # OAuth refresh -> cached access token (Phase 1 spike)
+│       └── ebay_client.py       # Browse comps, Media upload, REST publish (Phase 1 spike)
+├── scripts/
+│   └── ebay_sandbox_spike.py    # Live/mocked end-to-end eBay de-risk runner
 ├── tests/
 ├── docs/
 │   ├── FMEA.md
@@ -80,10 +91,11 @@ lister-bridge/
 
 | Component | Responsibility | Interfaces | Key Files |
 |---|---|---|---|
-| Core/IO | Fetching images from Drive, managing the CLI loop | Google Drive API, User Terminal | `orchestrator.py`, `drive_fetcher.py` |
-| AI/Vision | Extracting item specifics, condition, and defects | Core/IO, Gemini Multimodal | `vision_agent.py` |
-| AI/Logic | Establishing the Margin-Guard price | AI/Vision, Gemini standard | `margin_guard.py` |
-| API/eBay | Transforming internal JSON to GraphQL schema and posting | Core/IO, eBay GraphQL API | `ebay_graphql.py` |
+| Contracts | Frozen typed schemas all modules build against | (imported by every layer) | `src/contracts/*` |
+| Core/IO | Fetching images from Drive, sequencing, state/dedup | Google Drive API, State store | `orchestrator.py`, `drive_fetcher.py`, `state_store.py` |
+| AI/Vision | Extracting item specifics, condition, and defects | Core/IO, AI provider | `provider.py`, `vision_agent.py` |
+| AI/Logic | Establishing the Margin-Guard price | AI/Vision, eBay Browse comps | `margin_guard.py` |
+| API/eBay | OAuth, Media image upload, REST Inventory publish | Core/IO, eBay Media + Sell Inventory + Browse REST APIs | `ebay_auth.py`, `ebay_client.py` |
 
 ---
 
