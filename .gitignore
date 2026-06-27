@@ -1,0 +1,13 @@
+# Environment variables — never commit credentials
+.env
+
+# Runtime image cache — ephemeral, large, not version-controlled
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
