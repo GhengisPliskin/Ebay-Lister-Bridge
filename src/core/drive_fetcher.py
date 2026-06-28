@@ -18,19 +18,16 @@ FMEA Constraints Enforced:
     exists. The Orchestrator catches DriveFetchError and surfaces a human-readable
     terminal message — errors are never silently swallowed.
 
-PENDING ENHANCEMENT — REQUIRED by PDR_Product_Deployment_Blueprint.md v1.1 (fixes A-01):
-  This module is "Built — needs enhancement". Two changes are required before the
-  Drive stage is complete (Phase 2, parallel work). They are NOT yet implemented;
-  the requirement is recorded here so the implementing agent has the exact scope:
+ENHANCEMENT — IMPLEMENTED (blueprint v1.1, fixes A-01):
+  This module was "Built — needs enhancement". Both required changes are now in
+  place (see _list_all_files() and _collect_images_recursive()):
     1. RECURSIVE SUBFOLDER TRAVERSAL. The confirmed UX is staging -> one subfolder
-       PER ITEM -> images. list_pending_batches() currently lists only the immediate
-       children of the staging folder and the immediate image children of each. It
-       must traverse per-item subfolders recursively so images nested below the first
-       level are not missed.
-    2. FULL PAGINATION. Every files().list() call below caps at pageSize=100 with no
-       pageToken loop, so anything past the first 100 results is silently dropped
-       (assumption A-01). All listing calls must loop on response 'nextPageToken'
-       until exhausted.
+       PER ITEM -> images. list_pending_batches() now traverses each per-item
+       subfolder's full subtree via _collect_images_recursive(), so images nested
+       below the first level are no longer missed.
+    2. FULL PAGINATION. Every files().list() call now loops on response
+       'nextPageToken' until exhausted (via _list_all_files()), so nothing past the
+       first 100 results is dropped (assumption A-01 resolved).
   Frozen-interface alignment: the public signatures (list_pending_batches() ->
   list[BatchMetadata]; download_batch_images(batch) -> tuple[list[str], bool]) are
   STABLE and must not change — vision_agent.extract_item() consumes the returned
@@ -407,6 +404,119 @@ def _resolve_cache_dir() -> str:
     return cache_dir
 
 
+def _list_all_files(service, query: str, files_fields: str) -> list:
+    """
+    Run a files().list query and return EVERY matching file across all pages.
+
+    Loops on the Drive 'nextPageToken' until exhausted, so result sets larger
+    than one page (pageSize=100) are fully retrieved. This implements the full
+    pagination required by blueprint v1.1 (fixes assumption A-01).
+
+    Args:
+        service: An authenticated Drive v3 service resource.
+        query: The Drive 'q' filter expression.
+        files_fields: The 'files(...)' field projection (e.g.
+                      "files(id, name, mimeType, modifiedTime)"). The required
+                      'nextPageToken' field is added automatically.
+
+    Returns:
+        list[dict]: All file resource dicts matching the query across all pages.
+
+    Side Effects:
+        Makes one or more Drive API files().list() calls, each wrapped in
+        _call_with_backoff() (PI-001).
+
+    Raises:
+        Exception: Propagates the last exception from _call_with_backoff() after
+                   retries are exhausted. Callers wrap this in DriveFetchError.
+
+    FMEA Constraints:
+        PI-001 — every page request goes through _call_with_backoff().
+    """
+    all_files: list = []
+    page_token = None
+
+    # Always request nextPageToken alongside the caller's file fields so we can
+    # detect and follow additional pages.
+    fields = f"nextPageToken, {files_fields}"
+
+    while True:
+        result = _call_with_backoff(
+            service.files()
+            .list(
+                q=query,
+                fields=fields,
+                pageSize=100,
+                pageToken=page_token,
+            )
+            .execute
+        )
+        all_files.extend(result.get("files", []))
+        page_token = result.get("nextPageToken")
+        # No further token means we have read the final page.
+        if not page_token:
+            break
+
+    return all_files
+
+
+def _collect_images_recursive(service, folder_id: str) -> list:
+    """
+    Collect image files within a folder AND all of its nested subfolders.
+
+    The confirmed UX is staging -> one subfolder per item -> images, but items
+    may nest images one or more levels deep. This walks the full subtree so no
+    image below the first level is missed (blueprint v1.1 recursive-traversal
+    requirement; fixes assumption A-01).
+
+    Args:
+        service: An authenticated Drive v3 service resource.
+        folder_id: The folder whose image subtree should be collected.
+
+    Returns:
+        list[dict]: Image file resource dicts (id, name, mimeType, modifiedTime)
+        gathered from this folder and every descendant folder.
+
+    Side Effects:
+        Makes paginated Drive API calls (image listing + subfolder listing) for
+        this folder and recursively for each subfolder, all via _call_with_backoff().
+
+    Raises:
+        Exception: Propagates from _list_all_files after retries are exhausted.
+                   Callers wrap this in DriveFetchError.
+
+    FMEA Constraints:
+        PI-001 — all listing calls go through _call_with_backoff() (via
+        _list_all_files).
+    """
+    images: list = []
+
+    # Images directly contained in this folder (all pages).
+    image_query = (
+        f"'{folder_id}' in parents "
+        f"and mimeType contains 'image/' "
+        f"and trashed = false"
+    )
+    images.extend(
+        _list_all_files(
+            service, image_query, "files(id, name, mimeType, modifiedTime)"
+        )
+    )
+
+    # Subfolders to descend into (all pages).
+    subfolder_query = (
+        f"'{folder_id}' in parents "
+        f"and mimeType = 'application/vnd.google-apps.folder' "
+        f"and trashed = false"
+    )
+    subfolders = _list_all_files(service, subfolder_query, "files(id, name)")
+    for sub in subfolders:
+        # Recurse: gather images from each nested subfolder's full subtree.
+        images.extend(_collect_images_recursive(service, sub["id"]))
+
+    return images
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
@@ -458,6 +568,9 @@ def list_pending_batches() -> list:
     # Assumption A-01: pageSize=100 is sufficient for this single-user use case.
     # If the staging folder accumulates more than 100 subfolders, batches beyond
     # 100 will be silently dropped until pagination (list_next) is implemented.
+    # RESOLVED (blueprint v1.1): A-01 is now fixed — this listing is paginated
+    # fully via _list_all_files() (loops on nextPageToken), so no subfolder past
+    # the first 100 is dropped. The note above is retained as historical context.
     folder_query = (
         f"'{staging_folder_id}' in parents "
         f"and mimeType = 'application/vnd.google-apps.folder' "
@@ -466,14 +579,9 @@ def list_pending_batches() -> list:
 
     last_exc = None
     try:
-        folder_result = _call_with_backoff(
-            service.files()
-            .list(
-                q=folder_query,
-                fields="files(id, name, createdTime, modifiedTime)",
-                pageSize=100,
-            )
-            .execute
+        # Fully paginated: retrieves every staging subfolder across all pages.
+        subfolders = _list_all_files(
+            service, folder_query, "files(id, name, createdTime, modifiedTime)"
         )
     except Exception as exc:
         last_exc = exc
@@ -482,8 +590,6 @@ def list_pending_batches() -> list:
             batch_folder_name="staging folder",
             cause=exc,
         )
-
-    subfolders = folder_result.get("files", [])
 
     batches: list = []
 
@@ -497,22 +603,11 @@ def list_pending_batches() -> list:
         # REQUIREMENT (pending, blueprint v1.1): this query must (a) recurse into
         # nested per-item subfolders and (b) loop on nextPageToken so >100 images
         # are not dropped. See the "PENDING ENHANCEMENT" note in the module docstring.
-        image_query = (
-            f"'{folder_id}' in parents "
-            f"and mimeType contains 'image/' "
-            f"and trashed = false"
-        )
-
+        # RESOLVED (blueprint v1.1): now handled by _collect_images_recursive(),
+        # which walks the per-item subtree and paginates each listing fully. The
+        # requirement note above is retained as historical context.
         try:
-            image_result = _call_with_backoff(
-                service.files()
-                .list(
-                    q=image_query,
-                    fields="files(id, name, mimeType, modifiedTime)",
-                    pageSize=100,
-                )
-                .execute
-            )
+            collected = _collect_images_recursive(service, folder_id)
         except Exception as exc:
             # A failure on a specific subfolder's file listing is treated as a
             # total batch failure — raise so the Orchestrator can surface it.
@@ -529,7 +624,7 @@ def list_pending_batches() -> list:
                 mime_type=f["mimeType"],
                 modified_time=f["modifiedTime"],
             )
-            for f in image_result.get("files", [])
+            for f in collected
         ]
 
         batches.append(

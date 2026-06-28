@@ -14,14 +14,57 @@ FMEA Constraints Enforced:
   - R-STATE — item_sku is the unique idempotency key; offer_id/listing_id written
     immediately after each eBay call so crash-and-resume never double-publishes.
   - R-AUTH / R-COST — token cache avoids re-minting a valid (~2h) access token.
-
-STATUS: interface stub (signatures + docstrings). Implemented by a parallel
-Phase 0/4 agent against the frozen state contracts (src.contracts.state).
 """
 
 from __future__ import annotations
 
+import json
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+
+from dotenv import load_dotenv
+
 from src.contracts import ItemRecord, ItemStatus, TokenCacheRecord
+
+load_dotenv()
+
+# Default DB location if STATE_STORE_DB_PATH is unset.
+_DEFAULT_DB_PATH = "data/state/lister_bridge.db"
+
+# The token cache holds a single row, addressed by this fixed id.
+_TOKEN_ROW_ID = 1
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC time as an ISO 8601 string (for updated_at)."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _resolve_db_path(db_path: str | None) -> str:
+    """
+    Resolve the SQLite DB path, anchoring a relative path to the project root.
+
+    Args:
+        db_path: Explicit path, or None to read STATE_STORE_DB_PATH / default.
+
+    Returns:
+        An absolute path string; the parent directory is created if missing.
+
+    Side Effects:
+        Creates the parent directory tree.
+    """
+    raw = db_path or os.environ.get("STATE_STORE_DB_PATH") or _DEFAULT_DB_PATH
+    if not os.path.isabs(raw):
+        # Anchor to the project root (src/core/ -> src/ -> root) so the DB is
+        # consistent regardless of the invocation directory.
+        project_root = Path(__file__).parent.parent.parent
+        resolved = project_root / raw
+    else:
+        resolved = Path(raw)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return str(resolved)
 
 
 class StateStore:
@@ -38,40 +81,121 @@ class StateStore:
         Open (and lazily create/migrate) the SQLite database.
 
         Args:
-            db_path: Override for STATE_STORE_DB_PATH (else read from env).
+            db_path: Override for STATE_STORE_DB_PATH (else env / default). Pass
+                ":memory:" for an ephemeral in-process DB (used by tests).
 
         Returns:
             None
 
         Side Effects:
             Opens a SQLite connection; creates the schema on first use.
-
-        Raises:
-            NotImplementedError: This is a stub.
         """
-        raise NotImplementedError("StateStore.__init__ is a stub")
+        # ":memory:" is passed straight through; everything else is resolved/created.
+        self.db_path = db_path if db_path == ":memory:" else _resolve_db_path(db_path)
+        # check_same_thread=False keeps a single Streamlit/orchestrator process
+        # flexible across threads; access is serialized by SQLite's own locking.
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._create_schema()
+
+    def _create_schema(self) -> None:
+        """
+        Create the items + token_cache tables if they do not already exist.
+
+        Returns:
+            None
+
+        Side Effects:
+            Executes DDL and commits.
+        """
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS items (
+                item_sku        TEXT PRIMARY KEY,
+                batch_folder_id TEXT NOT NULL,
+                status          TEXT NOT NULL,
+                offer_id        TEXT,
+                listing_id      TEXT,
+                eps_urls        TEXT NOT NULL DEFAULT '[]',
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS token_cache (
+                id               INTEGER PRIMARY KEY CHECK (id = 1),
+                access_token     TEXT NOT NULL,
+                expires_at_epoch REAL NOT NULL,
+                scopes           TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        self._conn.commit()
+
+    # ── items ────────────────────────────────────────────────────────────────
+
+    def _row_to_record(self, row: sqlite3.Row) -> ItemRecord:
+        """
+        Convert a sqlite Row into an ItemRecord (parsing eps_urls JSON).
+
+        Args:
+            row: A sqlite3.Row from the items table.
+
+        Returns:
+            The corresponding ItemRecord.
+        """
+        return ItemRecord(
+            item_sku=row["item_sku"],
+            batch_folder_id=row["batch_folder_id"],
+            status=ItemStatus(row["status"]),
+            offer_id=row["offer_id"],
+            listing_id=row["listing_id"],
+            eps_urls=json.loads(row["eps_urls"]) if row["eps_urls"] else [],
+            updated_at=row["updated_at"],
+        )
 
     def upsert_item(self, record: ItemRecord) -> None:
         """
         Insert or update an item row, keyed on item_sku.
 
         Args:
-            record: The ItemRecord to persist.
+            record: The ItemRecord to persist. updated_at is stamped here if the
+                record does not already carry one.
 
         Returns:
             None
 
         Side Effects:
-            Writes one row to the items table; sets updated_at.
-
-        Raises:
-            NotImplementedError: This is a stub.
+            Writes one row to the items table; commits.
 
         FMEA Constraints:
             R-STATE — written immediately after each pipeline/eBay step so a
             crash-and-resume sees committed offer_id/listing_id.
         """
-        raise NotImplementedError("StateStore.upsert_item is a stub")
+        updated_at = record.updated_at or _utc_now_iso()
+        self._conn.execute(
+            """
+            INSERT INTO items
+                (item_sku, batch_folder_id, status, offer_id, listing_id,
+                 eps_urls, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(item_sku) DO UPDATE SET
+                batch_folder_id = excluded.batch_folder_id,
+                status          = excluded.status,
+                offer_id        = excluded.offer_id,
+                listing_id      = excluded.listing_id,
+                eps_urls        = excluded.eps_urls,
+                updated_at      = excluded.updated_at
+            """,
+            (
+                record.item_sku,
+                record.batch_folder_id,
+                record.status.value,
+                record.offer_id,
+                record.listing_id,
+                json.dumps(record.eps_urls),
+                updated_at,
+            ),
+        )
+        self._conn.commit()
 
     def get_item(self, item_sku: str) -> ItemRecord | None:
         """
@@ -82,11 +206,12 @@ class StateStore:
 
         Returns:
             The ItemRecord, or None if the SKU is unknown.
-
-        Raises:
-            NotImplementedError: This is a stub.
         """
-        raise NotImplementedError("StateStore.get_item is a stub")
+        cur = self._conn.execute(
+            "SELECT * FROM items WHERE item_sku = ?", (item_sku,)
+        )
+        row = cur.fetchone()
+        return self._row_to_record(row) if row else None
 
     def is_published(self, item_sku: str) -> bool:
         """
@@ -98,14 +223,15 @@ class StateStore:
         Returns:
             True if a row exists with status == PUBLISHED.
 
-        Raises:
-            NotImplementedError: This is a stub.
-
         FMEA Constraints:
             R-STATE — the orchestrator calls this before any eBay publish to
             skip already-live items.
         """
-        raise NotImplementedError("StateStore.is_published is a stub")
+        cur = self._conn.execute(
+            "SELECT 1 FROM items WHERE item_sku = ? AND status = ?",
+            (item_sku, ItemStatus.PUBLISHED.value),
+        )
+        return cur.fetchone() is not None
 
     def set_status(self, item_sku: str, status: ItemStatus) -> None:
         """
@@ -119,32 +245,55 @@ class StateStore:
             None
 
         Side Effects:
-            Writes status + updated_at for the row.
-
-        Raises:
-            NotImplementedError: This is a stub.
+            Writes status + updated_at for the row; commits. No-op if the SKU is
+            unknown (the orchestrator upserts before setting status).
         """
-        raise NotImplementedError("StateStore.set_status is a stub")
+        self._conn.execute(
+            "UPDATE items SET status = ?, updated_at = ? WHERE item_sku = ?",
+            (status.value, _utc_now_iso(), item_sku),
+        )
+        self._conn.commit()
+
+    def list_items(self) -> list[ItemRecord]:
+        """
+        Return all item records, newest update first.
+
+        Returns:
+            A list of ItemRecord ordered by updated_at descending. Useful for the
+            UI to render the current pipeline state.
+        """
+        cur = self._conn.execute("SELECT * FROM items ORDER BY updated_at DESC")
+        return [self._row_to_record(r) for r in cur.fetchall()]
+
+    # ── token cache ──────────────────────────────────────────────────────────
 
     def get_cached_token(self) -> TokenCacheRecord | None:
         """
-        Return the cached eBay access token, or None if absent/expired-unknown.
+        Return the cached eBay access token, or None if none is stored.
 
         Returns:
             The TokenCacheRecord, or None. Expiry checking is the caller's
             responsibility (ebay_auth compares expires_at_epoch to now).
 
-        Raises:
-            NotImplementedError: This is a stub.
-
         FMEA Constraints:
             R-AUTH / R-COST — lets ebay_auth reuse a valid token.
         """
-        raise NotImplementedError("StateStore.get_cached_token is a stub")
+        cur = self._conn.execute(
+            "SELECT access_token, expires_at_epoch, scopes FROM token_cache WHERE id = ?",
+            (_TOKEN_ROW_ID,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return TokenCacheRecord(
+            access_token=row["access_token"],
+            expires_at_epoch=row["expires_at_epoch"],
+            scopes=row["scopes"],
+        )
 
     def save_cached_token(self, token: TokenCacheRecord) -> None:
         """
-        Persist the eBay access token to the cache.
+        Persist the eBay access token to the cache (single-row upsert).
 
         Args:
             token: The TokenCacheRecord to store.
@@ -153,9 +302,21 @@ class StateStore:
             None
 
         Side Effects:
-            Overwrites the single cached token row.
-
-        Raises:
-            NotImplementedError: This is a stub.
+            Overwrites the single cached token row; commits.
         """
-        raise NotImplementedError("StateStore.save_cached_token is a stub")
+        self._conn.execute(
+            """
+            INSERT INTO token_cache (id, access_token, expires_at_epoch, scopes)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                access_token     = excluded.access_token,
+                expires_at_epoch = excluded.expires_at_epoch,
+                scopes           = excluded.scopes
+            """,
+            (_TOKEN_ROW_ID, token.access_token, token.expires_at_epoch, token.scopes),
+        )
+        self._conn.commit()
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection."""
+        self._conn.close()
