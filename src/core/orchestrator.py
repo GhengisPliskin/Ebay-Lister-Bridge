@@ -14,19 +14,47 @@ Key Interfaces:
   - Output: per-item ItemRecord updates; assembled ListingPayload(s) for the UI;
     PublishResult after an approved publish.
 FMEA Constraints Enforced:
-  - PI-003 — context flushed per item.
-  - R-STATE — dedup + resume via the state store.
-
-STATUS: interface stub (signatures + docstrings). Implemented by a parallel
-Phase 4 agent against the frozen contracts. The human approval gate lives in the
-UI (PI-007); the orchestrator never auto-publishes.
+  - PI-003 — context flushed per item (the provider is stateless per call).
+  - R-STATE — dedup + resume via the state store; IDs written right after publish.
+  - PI-007 — the orchestrator never auto-publishes; publish_approved is only
+    called after an explicit human Approve in the UI.
 """
 
 from __future__ import annotations
 
-from src.ai.provider import AIProvider
-from src.contracts import ListingPayload, PublishResult
+import os
+
+from src.ai.provider import AIProvider, GeminiProvider
+from src.ai import margin_guard, vision_agent
+from src.contracts import (
+    ItemRecord,
+    ItemStatus,
+    ListingPayload,
+    MarginGuardOutput,
+    PublishResult,
+    VisionAgentOutput,
+)
+from src.core import drive_fetcher
 from src.core.state_store import StateStore
+
+# Aspects used (in order) to build a default listing title from the specifics.
+_TITLE_ASPECTS = ("Brand", "Product Line", "Model", "Type")
+
+# Free-text condition -> eBay condition enum. Checked in order; first hit wins.
+_CONDITION_MAP = [
+    ("for parts", "FOR_PARTS_OR_NOT_WORKING"),
+    ("not working", "FOR_PARTS_OR_NOT_WORKING"),
+    ("like new", "LIKE_NEW"),
+    ("new other", "NEW_OTHER"),
+    ("open box", "NEW_OTHER"),
+    ("brand new", "NEW"),
+    ("excellent", "USED_EXCELLENT"),
+    ("very good", "USED_VERY_GOOD"),
+    ("acceptable", "USED_ACCEPTABLE"),
+    ("good", "USED_GOOD"),
+    ("used", "USED_GOOD"),
+    ("new", "NEW"),
+]
 
 
 def derive_sku(batch_folder_id: str) -> str:
@@ -39,18 +67,104 @@ def derive_sku(batch_folder_id: str) -> str:
     Returns:
         The SKU string, e.g. "LB-{folderId}" (the idempotency key).
 
-    Raises:
-        NotImplementedError: This is a Phase 4 stub.
+    Side Effects:
+        None.
 
     FMEA Constraints:
         R-STATE — stable SKU is the dedup/idempotency anchor.
     """
-    raise NotImplementedError("orchestrator.derive_sku is a Phase 4 stub")
+    return f"LB-{batch_folder_id}"
+
+
+def _to_ebay_condition(condition_text: str) -> str:
+    """
+    Map a free-text condition descriptor to an eBay condition enum string.
+
+    Args:
+        condition_text: The Vision Agent's condition string (e.g. "Used - Good").
+
+    Returns:
+        An eBay condition enum (e.g. "USED_GOOD"); defaults to "USED_GOOD" when
+        nothing matches and a value is present, or "" when the input is empty
+        (so the operator must set it in the UI).
+    """
+    text = (condition_text or "").strip().lower()
+    if not text:
+        return ""
+    for needle, enum_value in _CONDITION_MAP:
+        if needle in text:
+            return enum_value
+    return "USED_GOOD"
+
+
+def _build_title(vision: VisionAgentOutput, fallback: str) -> str:
+    """
+    Build a listing title from priority aspects, falling back to the folder name.
+
+    Args:
+        vision: The item's VisionAgentOutput.
+        fallback: A fallback title (e.g. the Drive folder name).
+
+    Returns:
+        A title string capped at 80 characters (eBay's title limit).
+    """
+    parts = [
+        vision.item_specifics[a] for a in _TITLE_ASPECTS if a in vision.item_specifics
+    ]
+    title = " ".join(p for p in parts if p).strip() or fallback
+    return title[:80]
+
+
+def _assemble_payload(
+    sku: str,
+    batch: dict,
+    image_paths: list[str],
+    vision: VisionAgentOutput,
+    pricing: MarginGuardOutput,
+) -> ListingPayload:
+    """
+    Assemble a ListingPayload from the per-item results + env config.
+
+    Args:
+        sku: The deterministic SKU.
+        batch: The drive_fetcher BatchMetadata dict (for folder name).
+        image_paths: Local image paths to upload at publish time.
+        vision: The item's extraction result.
+        pricing: The item's Margin-Guard result.
+
+    Returns:
+        A ListingPayload with everything known pre-approval. EPS URLs are empty
+        here (images upload at publish time); policies/location/category come
+        from .env. The operator finalizes price/condition/category in the UI.
+
+    Side Effects:
+        Reads eBay policy/location/marketplace/category env vars.
+    """
+    return ListingPayload(
+        item_sku=sku,
+        title=_build_title(vision, batch.get("folder_name", sku)),
+        item_specifics=vision.item_specifics,
+        condition=_to_ebay_condition(vision.condition),
+        quantity=1,
+        price=pricing.margin_guard_price,
+        category_id=os.environ.get("EBAY_DEFAULT_CATEGORY_ID", ""),
+        local_image_paths=image_paths,
+        eps_image_urls=[],
+        fulfillment_policy_id=os.environ.get("EBAY_FULFILLMENT_POLICY_ID", ""),
+        payment_policy_id=os.environ.get("EBAY_PAYMENT_POLICY_ID", ""),
+        return_policy_id=os.environ.get("EBAY_RETURN_POLICY_ID", ""),
+        merchant_location_key=os.environ.get("EBAY_INVENTORY_LOCATION_KEY", ""),
+        marketplace_id=os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_US"),
+        listing_description=pricing.reasoning,
+    )
 
 
 def scan_and_prepare(
     provider: AIProvider,
     store: StateStore,
+    *,
+    ebay_client=None,
+    cost_lookup=None,
 ) -> list[ListingPayload]:
     """
     Run drive -> vision -> pricing for every pending, not-yet-published item and
@@ -59,6 +173,11 @@ def scan_and_prepare(
     Args:
         provider: AIProvider for the vision step.
         store: StateStore for dedup, resume, and per-step recording.
+        ebay_client: Optional eBay client exposing search_active_comps; when
+            provided, active comps anchor the price. When None, pricing proceeds
+            with no comps (their absence routes to missing_inputs).
+        cost_lookup: Optional callable sku -> (cost, fees); returns (None, None)
+            when unknown so the UI resolves them (R-PRICE). Defaults to unknown.
 
     Returns:
         A list of ListingPayload, one per prepared item, ready for the UI review
@@ -67,23 +186,66 @@ def scan_and_prepare(
     Side Effects:
         Drive downloads; AI calls (context flushed per item, PI-003); state writes.
 
-    Raises:
-        NotImplementedError: This is a Phase 4 stub.
-
     FMEA Constraints:
-        PI-003 — flush AI context after each item.
-        R-STATE — skip SKUs already PUBLISHED; resume mid-batch safely.
+        PI-003 — each vision call is a stateless one-shot, so context is flushed
+        between items by construction.
+        R-STATE — skip SKUs already PUBLISHED; every step is recorded so an
+        interrupted run resumes without redoing published items.
     """
-    raise NotImplementedError("orchestrator.scan_and_prepare is a Phase 4 stub")
+    payloads: list[ListingPayload] = []
+
+    for batch in drive_fetcher.list_pending_batches():
+        folder_id = batch["folder_id"]
+        sku = derive_sku(folder_id)
+
+        # R-STATE: never reprocess an already-live item.
+        if store.is_published(sku):
+            continue
+
+        # Record the item as seen before doing any expensive work.
+        store.upsert_item(
+            ItemRecord(item_sku=sku, batch_folder_id=folder_id, status=ItemStatus.NEW)
+        )
+
+        # 1) Drive: download this batch's images (recursive + paginated).
+        image_paths, _stale_warning = drive_fetcher.download_batch_images(batch)
+
+        # 2) Vision: extract specifics/condition/defects (stateless call, PI-003).
+        vision = vision_agent.extract_item(image_paths, provider)
+        store.set_status(sku, ItemStatus.EXTRACTED)
+
+        # 3) Pricing: cost/fees are operator inputs (unknown here -> missing_inputs).
+        cost, fees = (cost_lookup(sku) if cost_lookup else (None, None))
+        if ebay_client is not None:
+            pricing = margin_guard.fetch_and_price(
+                vision, ebay_client, cost=cost, fees=fees
+            )
+        else:
+            pricing = margin_guard.price_item(
+                vision, cost=cost, fees=fees, active_comps=None
+            )
+        store.set_status(sku, ItemStatus.PRICED)
+
+        # 4) Assemble the review payload (not published; PI-007).
+        payloads.append(_assemble_payload(sku, batch, image_paths, vision, pricing))
+
+    return payloads
 
 
-def publish_approved(payload: ListingPayload, store: StateStore) -> PublishResult:
+def publish_approved(
+    payload: ListingPayload,
+    store: StateStore,
+    *,
+    ebay_client=None,
+) -> PublishResult:
     """
     Publish a single operator-approved payload via ebay_client and record IDs.
 
     Args:
         payload: The ListingPayload the operator approved in the UI.
         store: StateStore to record offer_id/listing_id immediately after the call.
+        ebay_client: Optional EbayClient (tests inject a fake). When None, a real
+            EbayClient is constructed from the environment.
 
     Returns:
         PublishResult with offer_id, listing_id, and EPS URLs.
@@ -92,31 +254,64 @@ def publish_approved(payload: ListingPayload, store: StateStore) -> PublishResul
         Uploads images, creates inventory item/offer, publishes the offer, and
         writes the resulting IDs to the state store before returning.
 
-    Raises:
-        NotImplementedError: This is a Phase 4 stub.
-
     FMEA Constraints:
         PI-007 — only ever called after an explicit human Approve in the UI.
         R-STATE — IDs written immediately so resume never double-publishes.
     """
-    raise NotImplementedError("orchestrator.publish_approved is a Phase 4 stub")
+    # R-STATE: defensive dedup — never double-publish a live SKU.
+    if store.is_published(payload.item_sku):
+        existing = store.get_item(payload.item_sku)
+        return PublishResult(
+            item_sku=payload.item_sku,
+            offer_id=existing.offer_id or "",
+            listing_id=existing.listing_id or "",
+            eps_image_urls=existing.eps_urls,
+        )
+
+    if ebay_client is None:
+        # Lazy construction so importing this module needs no eBay env/creds.
+        from src.api.ebay_client import EbayClient
+
+        ebay_client = EbayClient()
+
+    result = ebay_client.publish_listing(payload)
+
+    # R-STATE: persist offer/listing IDs immediately after the eBay call.
+    store.upsert_item(
+        ItemRecord(
+            item_sku=result.item_sku,
+            batch_folder_id=payload.item_sku.removeprefix("LB-"),
+            status=ItemStatus.PUBLISHED,
+            offer_id=result.offer_id,
+            listing_id=result.listing_id,
+            eps_urls=result.eps_image_urls,
+        )
+    )
+    return result
 
 
 def main() -> None:
     """
     Headless entry point: `python -m src.core.orchestrator`.
 
-    Wires up the provider, state store, and runs scan_and_prepare in a headless
+    Wires up the provider and state store and runs scan_and_prepare in a headless
     (no-Streamlit) mode for scripting/CI smoke use. Publishing still requires an
-    explicit approval input (PI-007).
+    explicit approval step in the UI (PI-007), so this only prepares + reports.
 
     Returns:
         None
 
-    Raises:
-        NotImplementedError: This is a Phase 4 stub.
+    Side Effects:
+        Reads env config; runs the scan pipeline; prints a summary to stdout.
     """
-    raise NotImplementedError("orchestrator.main is a Phase 4 stub")
+    provider = GeminiProvider()
+    store = StateStore()
+    payloads = scan_and_prepare(provider, store)
+
+    print(f"Prepared {len(payloads)} item(s) for review:")
+    for p in payloads:
+        print(f"  - {p.item_sku}: {p.title} @ ${p.price:.2f} ({len(p.local_image_paths)} photos)")
+    print("Open the Streamlit UI to review and Approve before publishing (PI-007).")
 
 
 if __name__ == "__main__":
