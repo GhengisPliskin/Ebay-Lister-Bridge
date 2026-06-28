@@ -97,6 +97,30 @@ def _to_ebay_condition(condition_text: str) -> str:
     return "USED_GOOD"
 
 
+def _build_description(vision: VisionAgentOutput) -> str:
+    """
+    Build a human-readable eBay item description that DISCLOSES defects (PI-004).
+
+    Args:
+        vision: The item's VisionAgentOutput.
+
+    Returns:
+        A plain-text description: condition line + an explicit defects section
+        (or a "no visible defects noted" line). This carries the defects through
+        the payload so the operator confirms them on the review screen and so the
+        live listing discloses them to the buyer.
+    """
+    lines: list[str] = []
+    if vision.condition:
+        lines.append(f"Condition: {vision.condition}.")
+    if vision.defects_found:
+        lines.append("Noted defects:")
+        lines.extend(f"- {d}" for d in vision.defects_found)
+    else:
+        lines.append("No visible defects noted.")
+    return "\n".join(lines)
+
+
 def _build_title(vision: VisionAgentOutput, fallback: str) -> str:
     """
     Build a listing title from priority aspects, falling back to the folder name.
@@ -155,7 +179,8 @@ def _assemble_payload(
         return_policy_id=os.environ.get("EBAY_RETURN_POLICY_ID", ""),
         merchant_location_key=os.environ.get("EBAY_INVENTORY_LOCATION_KEY", ""),
         marketplace_id=os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_US"),
-        listing_description=pricing.reasoning,
+        # Description discloses defects (PI-004); pricing.reasoning stays internal.
+        listing_description=_build_description(vision),
     )
 
 
