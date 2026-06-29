@@ -15,6 +15,7 @@ on these signatures being stable. Changing a field is a contract change — log 
 in working/CODE_DECISIONS_PATCH.md and coordinate before editing.
 """
 
+from src.contracts.adapter import AdapterCapability, DraftOutput
 from src.contracts.ebay import (
     EBAY_MAX_IMAGE_BYTES,
     EBAY_MAX_IMAGES_PER_LISTING,
@@ -63,4 +64,7 @@ __all__ = [
     "ItemRecord",
     "ItemStatus",
     "TokenCacheRecord",
+    # adapter (v1.2, additive)
+    "AdapterCapability",
+    "DraftOutput",
 ]
