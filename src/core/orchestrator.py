@@ -27,6 +27,8 @@ import os
 from src.ai.provider import AIProvider, GeminiProvider
 from src.ai import margin_guard, vision_agent
 from src.contracts import (
+    AdapterCapability,
+    DraftOutput,
     ItemRecord,
     ItemStatus,
     ListingPayload,
@@ -36,6 +38,7 @@ from src.contracts import (
 )
 from src.core import drive_fetcher
 from src.core.state_store import StateStore
+from src.marketplace import EbayAdapter, get_adapter
 
 # Aspects used (in order) to build a default listing title from the specifics.
 _TITLE_ASPECTS = ("Brand", "Product Line", "Model", "Type")
@@ -283,6 +286,30 @@ def publish_approved(
         PI-007 — only ever called after an explicit human Approve in the UI.
         R-STATE — IDs written immediately so resume never double-publishes.
     """
+    # The eBay path is now one AUTO_PUBLISH adapter among many; this function is
+    # kept as the stable eBay entry point and delegates to the shared helper.
+    return _auto_publish(EbayAdapter(client=ebay_client), payload, store)
+
+
+def _auto_publish(adapter, payload: ListingPayload, store: StateStore) -> PublishResult:
+    """
+    Run an AUTO_PUBLISH adapter with dedup + immediate state recording.
+
+    Args:
+        adapter: An AutoPublishAdapter (e.g. EbayAdapter) exposing publish().
+        payload: The operator-approved ListingPayload.
+        store: StateStore for dedup + ID recording.
+
+    Returns:
+        The PublishResult (fresh, or reconstructed from state on a dedup hit).
+
+    Side Effects:
+        Calls adapter.publish() and writes PUBLISHED state immediately after.
+
+    FMEA Constraints:
+        R-STATE — defensive dedup + IDs persisted right after the publish call.
+        PI-007 — only reached after an explicit human Approve.
+    """
     # R-STATE: defensive dedup — never double-publish a live SKU.
     if store.is_published(payload.item_sku):
         existing = store.get_item(payload.item_sku)
@@ -293,15 +320,9 @@ def publish_approved(
             eps_image_urls=existing.eps_urls,
         )
 
-    if ebay_client is None:
-        # Lazy construction so importing this module needs no eBay env/creds.
-        from src.api.ebay_client import EbayClient
+    result = adapter.publish(payload)
 
-        ebay_client = EbayClient()
-
-    result = ebay_client.publish_listing(payload)
-
-    # R-STATE: persist offer/listing IDs immediately after the eBay call.
+    # R-STATE: persist offer/listing IDs immediately after the publish call.
     store.upsert_item(
         ItemRecord(
             item_sku=result.item_sku,
@@ -313,6 +334,53 @@ def publish_approved(
         )
     )
     return result
+
+
+def fulfill_approved(
+    payload: ListingPayload,
+    store: StateStore,
+    *,
+    target: str = "ebay",
+    ebay_client=None,
+    output_dir: str | None = None,
+) -> PublishResult | DraftOutput:
+    """
+    Route an approved payload to the chosen marketplace target (v1.2).
+
+    Auto-publish targets (e.g. "ebay") publish live and return a PublishResult,
+    recording PUBLISHED state. Draft-only targets (e.g. "other:mercari") render a
+    posting to disk and return a DraftOutput, leaving item state unchanged (a
+    draft is a manual export, not a publish — PI-007).
+
+    Args:
+        payload: The operator-approved ListingPayload.
+        store: StateStore for dedup + state recording (auto-publish path).
+        target: A marketplace target key (see marketplace.list_targets()).
+        ebay_client: Optional injected EbayClient for the eBay adapter (tests).
+        output_dir: Base directory for draft output; defaults to
+            DRAFT_OUTPUT_DIR env or "data/drafts".
+
+    Returns:
+        PublishResult for auto-publish targets, DraftOutput for draft targets.
+
+    Side Effects:
+        Auto-publish: a live publish + state write. Draft: files written to disk.
+
+    Raises:
+        ValueError: If the target key is unknown.
+
+    FMEA Constraints:
+        PI-007 — drafts are never auto-posted; auto-publish only after Approve.
+        R-STATE — auto-publish records IDs immediately (via _auto_publish).
+    """
+    adapter = get_adapter(target, ebay_client=ebay_client)
+
+    if adapter.capability == AdapterCapability.AUTO_PUBLISH:
+        return _auto_publish(adapter, payload, store)
+
+    # DRAFT_ONLY: render a posting to disk for manual upload.
+    out_dir = output_dir or os.environ.get("DRAFT_OUTPUT_DIR", "data/drafts")
+    return adapter.render_draft(payload, out_dir)
 
 
 def main() -> None:

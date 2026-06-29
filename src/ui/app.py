@@ -30,9 +30,10 @@ import streamlit as st
 
 from src.ai.provider import GeminiProvider
 from src.api.ebay_client import EbayClient
-from src.contracts import VisionAgentOutput
+from src.contracts import DraftOutput, VisionAgentOutput
 from src.core import orchestrator
 from src.core.state_store import StateStore
+from src import marketplace
 from src.ui import review
 
 
@@ -142,22 +143,48 @@ def _render_item(payload, store) -> None:
         if problems:
             st.error("Cannot publish yet: " + "; ".join(problems))
 
+        # ── Target selection (v1.2): eBay auto-publish vs an "Other" draft ────
+        targets = marketplace.list_targets()
+        target = st.selectbox(
+            "Target marketplace",
+            targets,
+            format_func=marketplace.target_label,
+            key=f"target_{payload.item_sku}",
+        )
+        is_draft = target != "ebay"
+
+        # Draft targets don't need eBay policy/category fields, so only block
+        # auto-publish on validation problems.
+        button_label = (
+            f"Generate {marketplace.target_label(target)}"
+            if is_draft else "Approve & Publish to eBay"
+        )
+
         # ── The human gate (PI-007) ───────────────────────────────────────────
-        if st.button("Approve & Publish", disabled=bool(problems),
+        if st.button(button_label, disabled=(bool(problems) and not is_draft),
                      key=f"approve_{payload.item_sku}"):
             try:
-                result = orchestrator.publish_approved(
-                    edited, store, ebay_client=EbayClient()
+                result = orchestrator.fulfill_approved(
+                    edited, store, target=target, ebay_client=EbayClient(),
                 )
-                url = result.listing_url or (
-                    f"https://www.ebay.com/itm/{result.listing_id}"
-                    if result.listing_id else ""
-                )
-                st.success(f"Published! Offer {result.offer_id} · Listing {result.listing_id}")
-                if url:
-                    st.markdown(f"[View live listing]({url})")
-            except Exception as exc:  # surface eBay errors, don't crash the UI
-                st.error(f"Publish failed: {type(exc).__name__}: {exc}")
+                if isinstance(result, DraftOutput):
+                    st.success(
+                        f"Draft for {result.platform_label} written to "
+                        f"`{result.draft_path}`"
+                    )
+                    st.caption(f"Photo manifest: `{result.manifest_path}`")
+                else:
+                    url = result.listing_url or (
+                        f"https://www.ebay.com/itm/{result.listing_id}"
+                        if result.listing_id else ""
+                    )
+                    st.success(
+                        f"Published! Offer {result.offer_id} · Listing {result.listing_id}"
+                    )
+                    if url:
+                        st.markdown(f"[View live listing]({url})")
+            except Exception as exc:  # surface adapter errors, don't crash the UI
+                st.error(f"Action failed: {type(exc).__name__}: {exc}")
 
 
 def main() -> None:

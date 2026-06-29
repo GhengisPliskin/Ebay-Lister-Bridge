@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.contracts import ItemStatus, ListingPayload, PublishResult
+from src.contracts import DraftOutput, ItemStatus, ListingPayload, PublishResult
 from src.core import orchestrator
 from src.core.state_store import StateStore
 
@@ -176,3 +176,42 @@ def test_publish_approved_dedup_no_double_publish(store):
     result = orchestrator.publish_approved(_full_payload(), store, ebay_client=client)
     assert client.published == []  # eBay never called
     assert result.listing_id == "OLD-LIST"
+
+
+# ── fulfill_approved routing (v1.2) ───────────────────────────────────────────
+
+
+def test_fulfill_routes_ebay_to_auto_publish(store):
+    """target='ebay' publishes and records state (same as publish_approved)."""
+    client = _FakeEbayClient()
+    result = orchestrator.fulfill_approved(
+        _full_payload(), store, target="ebay", ebay_client=client
+    )
+    assert isinstance(result, PublishResult)
+    assert result.listing_id == "LIST-X"
+    assert store.get_item("LB-F1").status is ItemStatus.PUBLISHED
+    assert len(client.published) == 1
+
+
+def test_fulfill_routes_other_to_draft(tmp_path, store):
+    """target='other:mercari' writes a draft and does NOT touch eBay or publish state."""
+    client = _FakeEbayClient()
+    result = orchestrator.fulfill_approved(
+        _full_payload(), store, target="other:mercari",
+        ebay_client=client, output_dir=str(tmp_path),
+    )
+    assert isinstance(result, DraftOutput)
+    assert result.platform == "mercari"
+    # No eBay publish, and the item is not marked PUBLISHED (draft is an export).
+    assert client.published == []
+    assert store.is_published("LB-F1") is False
+    # Files were written under the chosen output dir.
+    from pathlib import Path
+
+    assert Path(result.draft_path).is_file()
+    assert str(tmp_path) in result.draft_path
+
+
+def test_fulfill_unknown_target_raises(store):
+    with pytest.raises(ValueError):
+        orchestrator.fulfill_approved(_full_payload(), store, target="amazon")
