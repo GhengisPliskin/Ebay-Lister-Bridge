@@ -1,19 +1,20 @@
 # Product Deployment Blueprint — Lister-Bridge Hybrid Agent
 
-**Version:** 1.1 · **Date:** June 27, 2026 · **Status:** Build-ready — decisions committed
+**Version:** 1.2 · **Date:** June 30, 2026 · **Status:** Build-ready — decisions committed
 **Grounding:** Full read of the ELB repository + external verification of eBay and Gemini APIs (June 2026).
 **Formatting:** Generated through the `hfe-mayer` skill (HFE + Mayer cognitive-load rules).
-**This revision:** see the Revision log at the end. Major change — eBay listing path committed to REST; GraphQL preview path dropped; image upload via Media API; pricing rebased on active comps.
+**This revision (v1.2):** see the Revision log at the end. Major change — a **MarketplaceAdapter layer** (eBay auto-publish + a generic **"Other" draft** adapter for Facebook Marketplace / Mercari; Etsy a future auto-publish candidate) and **single-`.exe` desktop packaging** (pywebview + PyInstaller via `streamlit-desktop-app`).
+**Prior revision (v1.1):** eBay listing path committed to REST; GraphQL preview path dropped; image upload via Media API; pricing rebased on active comps.
 
 ---
 
 ## Executive summary
 
-**What we are building.** A single-user, local tool that converts phone photos of items — dropped into a Google Drive folder, one subfolder per item — into accurate, priced eBay listings, with a mandatory human approval gate before anything goes live. Gemini extracts item specifics, condition, and defects; pricing is anchored on live comparable listings and confirmed by the operator; the tool uploads the photos and publishes to eBay.
+**What we are building.** A single-user, local tool that converts phone photos of items — dropped into a Google Drive folder, one subfolder per item — into accurate, priced listings, with a mandatory human approval gate before anything goes live. Gemini extracts item specifics, condition, and defects; pricing is anchored on live comparable listings and confirmed by the operator. At the approval gate the operator picks a **target**: **eBay** (auto-publish via Media + REST) or a generic **"Other" draft** (Facebook Marketplace / Mercari) written to disk for manual posting. The whole GUI ships as a single Windows `.exe`.
 
-**Current state, one line.** Planning and governance are complete; only 1 of ~9 backend modules is built (Google Drive I/O), and it needs an enhancement — the AI core, eBay integration, state store, auth, and UI are unbuilt, so **the project does not yet run**.
+**Current state, one line.** Built and green — all backend modules (Drive I/O, Vision Agent, Margin-Guard, state store, eBay auth/client), the orchestrator, the Streamlit review/approve UI, the v1.2 marketplace-adapter layer, and packaging are implemented with a passing mocked test suite; **live eBay sandbox verification remains pending credentials** and the `.exe` binary build is **wired but deferred** (build on Python 3.11/3.12).
 
-**Decisions committed this revision (all approved).**
+**Decisions committed in v1.1 (all approved).**
 
 | Area | Committed decision |
 |---|---|
@@ -24,6 +25,8 @@
 | AI | **Gemini 3.5 Flash** (GA) behind a swappable provider interface; start on AI Studio free tier |
 | UI | **Streamlit** review/approve, superseding the logged CLI-only decision |
 | Governance | **Right-sized** — keep decision log + FMEA; drop the heavy two-phase/Kanban/spike ceremony |
+
+**Decisions added in v1.2 (all approved).** A capability-typed **MarketplaceAdapter** layer (eBay auto-publish + a generic **"Other" draft** for Facebook Marketplace / Mercari; **Etsy** a future auto-publish candidate), **additive** contract types (`AdapterCapability`, `DraftOutput`), and **single-`.exe` packaging** (pywebview + PyInstaller). See "Marketplace adapter layer (v1.2)", "Desktop packaging (v1.2)", DECISIONS D-11–D-13, and the Revision log.
 
 **Path to a working product (6 phases).** Foundations (deps, config, auth, state store) → eBay publish spike in sandbox, including image upload (highest risk first) → Drive enhancement + Vision Agent → Margin-Guard pricing → orchestrator pipeline + state → Streamlit UI → cost controls and hardening. The eBay spike and the Drive/Vision work depend only on completed code, so they run **in parallel**.
 
@@ -111,6 +114,44 @@ flowchart TD
 **This changes if** eBay introduces a single-call listing-creation method — the three-step REST sequence would collapse.
 
 ---
+
+## Marketplace adapter layer (v1.2)
+
+One listing pipeline now feeds many sell channels through a thin, capability-typed adapter so the orchestrator and UI stay channel-agnostic. The platform-agnostic listing (vision specifics + Margin-Guard price + photos) is assembled once; the operator picks a **target** at the approval gate.
+
+| Capability | Method | Returns | Adapters |
+|---|---|---|---|
+| **Auto-publish** | `publish(payload)` | `PublishResult` (live IDs) | **eBay** (REST Inventory + Media); **Etsy** — future candidate |
+| **Draft-only** | `render_draft(payload, dir)` | `DraftOutput` (+ files on disk) | **Other** generic adapter — **Facebook Marketplace**, **Mercari** templates |
+
+- **Interface.** `MarketplaceAdapter` (ABC) declares `name` + `capability`; `AutoPublishAdapter` and `DraftAdapter` specialize it. A registry (`get_adapter`, `list_targets`) selects the target by key (`ebay`, `other:facebook_marketplace`, `other:mercari`).
+- **eBay = refactor, not rewrite.** `EbayAdapter` wraps the existing `ebay_client` publish path unchanged; all prior eBay behavior and tests are preserved.
+- **"Other" draft.** Emits a ready-to-post Markdown posting (title, specifics, price, defect-disclosing description) plus a photo manifest, written per item per platform under `DRAFT_OUTPUT_DIR` (default `data/drafts/<sku>/<platform>/`). Adding a platform is one entry in `_PLATFORM_TEMPLATES` — no other code changes. Drafts are a **manual export**: nothing auto-posts, preserving the human gate (PI-007).
+- **Contracts extended additively.** New `AdapterCapability` enum + `DraftOutput` type; no existing contract changed.
+
+```mermaid
+flowchart TD
+    A[Approved ListingPayload] --> B{Adapter registry - target}
+    B -->|ebay| C[EbayAdapter - AUTO_PUBLISH]
+    B -->|other:facebook_marketplace| D[OtherDraftAdapter]
+    B -->|other:mercari| E[OtherDraftAdapter]
+    C --> F[ebay_client - Media plus REST publish to PublishResult]
+    D --> G[posting.md plus photos_manifest.txt to DraftOutput]
+    E --> G
+    C -.future.-> H[EtsyAdapter - AUTO_PUBLISH]
+```
+
+**This changes if** a draft platform later exposes a publish API — its adapter graduates from `DraftAdapter` to `AutoPublishAdapter` with no change to the orchestrator or UI.
+
+## Desktop packaging — single executable (v1.2)
+
+The local tool ships as one Windows `.exe` that launches the Streamlit GUI in a native window, so a non-technical operator needs no Python toolchain.
+
+- **Mechanism.** `streamlit-desktop-app` (pywebview window + PyInstaller) bundles `desktop_app.py` → `src/ui/app.py` and the `src` package into `dist/lister-bridge.exe`.
+- **Build.** `pip install -r requirements.txt -r requirements-build.txt` then `python scripts/build_desktop.py` (or `pyinstaller packaging/lister_bridge.spec`). Build-time deps are isolated in `requirements-build.txt` — not needed to run the app or tests.
+- **Build environment.** Use **Python 3.11/3.12**; `streamlit-desktop-app` 0.3.4 excludes 3.13. Packaging is wired and reproducible; producing the binary is a one-command CI/desktop step.
+
+**This changes if** distribution targets macOS/Linux — the same spec approach applies, but each OS must build its own binary.
 
 ## Verified external dependencies and APIs
 
@@ -341,6 +382,8 @@ Updated from the repo FMEA; eBay integration risks first.
 | **R-PRICE** | No sold-comp data (Insights gated) | Mispricing | High | Active-comp anchor + human-confirmed comp + floor |
 | **R-COST** | API spend/quota overrun | Surprise bill | Medium | Free tier start, batch, caching, budget alert |
 | **R-STATE** | Duplicate or re-published listings | Bad data, dup fees | Medium | State-store dedup + deterministic SKU + recorded listing IDs |
+| **R-DRAFT** | Operator forgets to post / edits a generated draft (no API confirm) | Item not listed | Low | Draft written to disk per item/platform with a clear path; draft is an explicit manual step, never silently "done" |
+| **R-PKG** | `.exe` build fragility (PyInstaller/streamlit data, Python 3.13) | No installable binary | Low | Build pinned to Python 3.11/3.12; reproducible build script + committed spec; runtime/test deps unaffected by build deps |
 | PI-007 | Operator approves flawed payload | Bad listing live | RPN 280 | UI diff + explicit Approve |
 | PI-003 | Context-window token bloat | Orchestrator crash | RPN 240 | Flush Gemini context per item |
 | PI-004 | Vision misses defects | INAD returns | RPN 224 | Forced `defects_found` confirmation |
@@ -369,6 +412,10 @@ Per the project's Constraint Change Protocol and FMEA amendment rule, the follow
 | **DECISION D-9** | Pin **Gemini 3.5 Flash** via `google-genai`, behind `provider.py` | Current GA; vendor-swappable |
 | **DECISION D-10** | **Right-size governance** — keep decision log + FMEA living; drop two-phase commit, Kanban WIP, spike-lock | Single-user, single-developer tool |
 | **Open option** | Allow GUI **direct upload** in addition to Drive capture | Low effort in Streamlit; operator convenience |
+| **DECISION D-11 (v1.2)** | Introduce a capability-typed **MarketplaceAdapter** layer; refactor eBay into `EbayAdapter`; add a generic **"Other" draft** adapter (Facebook Marketplace, Mercari) | Decouple the pipeline from any one channel; reach no-API platforms via manual drafts without weakening the human gate |
+| **DECISION D-12 (v1.2)** | Extend contracts **additively** (`AdapterCapability`, `DraftOutput`); leave all v1.1 contracts unchanged | Parallel/legacy code keeps working; new adapters opt in |
+| **DECISION D-13 (v1.2)** | Ship a **single `.exe`** via `streamlit-desktop-app` (pywebview + PyInstaller); isolate build deps in `requirements-build.txt` | Non-technical operator install with no Python toolchain; build deps don't burden runtime/tests |
+| **Future candidate** | **Etsy** as a second auto-publish adapter | Handmade/vintage overlap with the seller's inventory; has a publish API |
 
 **On governance (evidence-first).** The repo's process scaffolding (two-phase commit with mandatory HALT, housekeeping sessions, CI spike-lock) is well-built but disproportionate for one module and one developer; the overhead competes with shipping. Recommendation retained: keep the FMEA and a single decision log (real value for the eBay-risk paper trail); suspend the multi-session ceremony until there is more than one contributor.
 
@@ -391,6 +438,17 @@ Per the project's Constraint Change Protocol and FMEA amendment rule, the follow
 ---
 
 ## Revision log
+
+**v1.2 — June 30, 2026 (all changes approved):**
+
+1. Added a capability-typed **MarketplaceAdapter** layer (`src/marketplace/`): `MarketplaceAdapter` ABC + `AutoPublishAdapter` / `DraftAdapter`, a registry, and `target_label` (DECISION D-11).
+2. **Refactored** the eBay publish path into `EbayAdapter` wrapping `ebay_client` unchanged — all prior eBay behavior and tests preserved.
+3. Added the generic **"Other" draft** adapter with **Facebook Marketplace** and **Mercari** templates; writes a Markdown posting + photo manifest per item/platform; new platforms are one template entry.
+4. **Additive** contracts: `AdapterCapability` enum + `DraftOutput` (DECISION D-12); no v1.1 contract changed.
+5. Orchestrator gained `fulfill_approved` (capability routing); the Streamlit UI gained a **target selector** at the approval gate. Item descriptions now disclose defects (PI-004).
+6. Added **single-`.exe` desktop packaging** via `streamlit-desktop-app` (pywebview + PyInstaller): `desktop_app.py`, `scripts/build_desktop.py`, `packaging/lister_bridge.spec`, `requirements-build.txt`, README build docs (DECISION D-13). Build pinned to Python 3.11/3.12.
+7. Added risks **R-DRAFT** (manual-post step) and **R-PKG** (build fragility); added the adapter-layer and packaging diagrams/sections.
+8. **Etsy** logged as a future auto-publish candidate.
 
 **v1.1 — June 27, 2026 (all changes approved):**
 
