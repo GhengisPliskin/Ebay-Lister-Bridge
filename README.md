@@ -93,4 +93,30 @@ lister-bridge/
 
 1. Copy `.env.example` to `.env` and populate credentials (Gemini API key, Google Service Account JSON path, eBay OAuth tokens).
 2. Install dependencies: `pip install -r requirements.txt`
-3. Run: `python src/core/orchestrator.py`
+3. Run the GUI: `streamlit run src/ui/app.py` — or headless: `python -m src.core.orchestrator`
+
+## Marketplaces (v1.2)
+
+The approve step routes a listing to a selectable target via the `MarketplaceAdapter` layer (`src/marketplace/`):
+
+- **eBay** — auto-publish (Media upload → REST `createInventoryItem`/`createOffer`/`publishOffer`).
+- **Other (draft)** — generic draft-only adapter that writes a platform-tailored posting + photo manifest to disk for manual posting. Templates ship for **Facebook Marketplace** and **Mercari**; add a platform by adding one entry to `_PLATFORM_TEMPLATES` in `src/marketplace/other_adapter.py`. **Etsy** is a future auto-publish candidate.
+
+Drafts are written under `DRAFT_OUTPUT_DIR` (default `data/drafts/<item_sku>/<platform>/`).
+
+## Desktop build (single .exe, v1.2)
+
+Produce a standalone Windows executable that launches the Streamlit GUI in a native window (pywebview + PyInstaller, via `streamlit-desktop-app`):
+
+```bash
+pip install -r requirements.txt -r requirements-build.txt
+python scripts/build_desktop.py            # -> dist/lister-bridge.exe
+```
+
+Reproducible alternative (hand-authored spec):
+
+```bash
+pyinstaller packaging/lister_bridge.spec   # -> dist/lister-bridge.exe
+```
+
+Dev run without packaging: `python desktop_app.py`. Build dependencies live in `requirements-build.txt` and are **not** required to run the app or the tests.

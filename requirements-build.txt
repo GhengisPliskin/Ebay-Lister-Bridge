@@ -1,0 +1,13 @@
+# ── Lister-Bridge — BUILD-TIME dependencies (v1.2 desktop packaging) ─────────
+# These are NOT needed to run the app or the tests — only to produce the
+# standalone Windows .exe. Install alongside the runtime deps when packaging:
+#     pip install -r requirements.txt -r requirements-build.txt
+#
+# streamlit-desktop-app bundles the Streamlit GUI into a native window
+# (pywebview) and drives PyInstaller to emit a single executable.
+#
+# Python version caveat: build with Python 3.11 or 3.12 (the blueprint's 3.11+).
+# streamlit-desktop-app 0.3.4 explicitly excludes Python 3.13; on 3.13 pip falls
+# back to 0.3.3. Packaging is therefore pinned to a 3.11/3.12 build environment.
+streamlit-desktop-app>=0.3.3
+pyinstaller>=6.0

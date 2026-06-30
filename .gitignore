@@ -11,3 +11,9 @@ __pycache__/
 .venv/
 venv/
 env/
+
+# PyInstaller / desktop build artifacts (the .spec under packaging/ IS committed)
+build/
+dist/
+*.manifest
+build_log.txt
