@@ -1,24 +1,29 @@
 # ── Lister-Bridge Hybrid Agent — Dependency Manifest ─────────────────────────
 # Matches PDR_Product_Deployment_Blueprint.md v1.1 "Deployment blueprint".
 # SQLite is used for the state store but is part of the Python stdlib — no dep.
-# Python 3.11+ required.
+# Python 3.10+ required (the test suite passes on 3.10.12; see repo hygiene
+# Fix 2 — the loose >= bounds below were pinned to the exact versions
+# installed/verified in the current dev/CI environment via `pip show`).
 
 # Core / IO (existing — Google Drive fetcher)
-google-api-python-client>=2.100.0
-google-auth>=2.22.0
-python-dotenv>=1.0.0
+google-api-python-client==2.198.0
+google-auth==2.55.1
+python-dotenv==1.2.2
 
 # AI (Gemini) — Vision Agent extraction via the swappable provider interface.
 # DECISION D-9: pin Gemini 3.5 Flash via this SDK behind provider.py.
-google-genai>=1.0.0
+google-genai==2.10.0
 
 # eBay REST Inventory + Browse + Media APIs are plain HTTPS/JSON + multipart.
-requests>=2.31
+requests==2.34.2
 
 # Data contracts — the frozen pydantic schemas in src/contracts/.
-pydantic>=2.0
+pydantic==2.13.4
 
 # UI — Streamlit review/approve front end (supersedes the CLI-only decision).
+# NOTE: streamlit is NOT installed in the current test environment (the test
+# suite mocks around it / avoids importing it), so this entry is left as a
+# loose lower bound rather than a guessed exact pin.
 streamlit>=1.36
 
 # ── Test / dev only ──────────────────────────────────────────────────────────

@@ -41,14 +41,17 @@ import time
 from pathlib import Path
 from typing import TypedDict
 
-from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
-# Load .env variables once at module import time.
-load_dotenv()
+from src.core.paths import load_app_dotenv, resolve_app_path
+
+# Load .env variables once at module import time. Frozen-aware: tries the exe
+# dir / %APPDATA%/ListerBridge first under a PyInstaller onefile build; plain
+# load_dotenv() otherwise (unchanged). See src/core/paths.py (R-STATE).
+load_app_dotenv()
 
 # ── Module-level constants ────────────────────────────────────────────────────
 
@@ -290,15 +293,18 @@ def _load_cache_manifest(cache_dir: str) -> dict:
 
     Returns:
         dict: Mapping of file_id -> CacheManifestEntry. Returns an empty dict
-              if manifest.json does not exist (first run or cold cache).
+              if manifest.json does not exist (first run or cold cache), OR if
+              it exists but cannot be read/parsed (corrupt/malformed manifest
+              or an OS-level read failure) — both are treated as a cold cache
+              so the caller simply re-downloads everything rather than crash.
 
     Side Effects:
         Reads manifest.json from disk if it exists.
 
-    Raises:
-        json.JSONDecodeError: If manifest.json exists but is malformed.
-                              Callers should treat this as a cold cache and
-                              re-download all files.
+    FMEA Constraints:
+        PI-001 — a corrupt local manifest must never abort the scan; treating
+        it as a cold cache (re-download everything) is the safe degrade path,
+        matching the spirit of the Drive-side retry/fallback contract.
     """
     manifest_path = os.path.join(cache_dir, "manifest.json")
 
@@ -306,8 +312,20 @@ def _load_cache_manifest(cache_dir: str) -> dict:
     if not os.path.exists(manifest_path):
         return {}
 
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    # A corrupt/malformed manifest.json (json.JSONDecodeError) or an OS-level
+    # read failure (OSError, e.g. permissions/IO error) is treated as a cold
+    # cache rather than propagated — every image is simply re-downloaded and a
+    # fresh manifest is written on the next successful download.
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(
+            f"[drive_fetcher] WARNING: cache manifest at '{manifest_path}' is "
+            f"unreadable ({type(exc).__name__}: {exc}). Treating as cold cache.",
+            flush=True,
+        )
+        return {}
 
     # The manifest stores entries under a top-level "entries" key to allow
     # for future schema versioning (schema_version field).
@@ -368,9 +386,11 @@ def _resolve_cache_dir() -> str:
     """
     Read DRIVE_CACHE_DIR from the environment and resolve it to an absolute path.
 
-    Relative paths are resolved relative to the project root (two directories
-    above this file: src/core/ -> src/ -> project root). This ensures the
-    cache location is consistent regardless of where the user invokes the CLI.
+    Relative paths are resolved via resolve_app_path() (src/core/paths.py):
+    anchored to the project root when running from source, or to
+    %APPDATA%/ListerBridge when running as a frozen PyInstaller onefile .exe.
+    This ensures the cache location is consistent regardless of where the user
+    invokes the CLI, AND survives process exit under a frozen build.
 
     Args:
         None
@@ -383,6 +403,11 @@ def _resolve_cache_dir() -> str:
 
     Raises:
         EnvironmentError: If DRIVE_CACHE_DIR is not set in .env.
+
+    FMEA Constraints:
+        R-STATE — anchoring via resolve_app_path() keeps the image cache out of
+        the ephemeral sys._MEIPASS extraction dir in a frozen build, so cached
+        images are not silently lost every run.
     """
     cache_dir_env = os.environ.get("DRIVE_CACHE_DIR")
     if not cache_dir_env:
@@ -391,13 +416,10 @@ def _resolve_cache_dir() -> str:
             "(e.g., DRIVE_CACHE_DIR=data/cache/images)."
         )
 
-    # Anchor relative paths to the project root so the cache directory is
-    # consistent regardless of the current working directory at invocation time.
-    if not os.path.isabs(cache_dir_env):
-        project_root = Path(__file__).parent.parent.parent
-        cache_dir = str(project_root / cache_dir_env)
-    else:
-        cache_dir = cache_dir_env
+    # Anchor relative paths via the shared helper so the cache directory is
+    # consistent regardless of the current working directory at invocation
+    # time, and safe across runs under a frozen PyInstaller onefile build.
+    cache_dir = str(resolve_app_path(cache_dir_env))
 
     # Create the directory tree if it does not exist yet.
     Path(cache_dir).mkdir(parents=True, exist_ok=True)

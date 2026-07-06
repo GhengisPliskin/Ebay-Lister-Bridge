@@ -128,6 +128,152 @@ def test_scan_uses_ebay_comps_when_client_given(mock_drive, store):
     assert p1.price == 310.0  # median of the comps (no cost/fees floor)
 
 
+# ── scan_and_prepare: per-batch error isolation (Fix 1) ────────────────────────
+
+
+class _FlakyOnFirstBatchProvider:
+    """Raises a ValueError (simulating a Gemini JSON-parse failure) for the
+    first batch's images only; any other batch gets the canned vision JSON."""
+
+    def __init__(self, bad_path: str, good_text: str) -> None:
+        self._bad_path = bad_path
+        self._good_text = good_text
+
+    def generate_from_images(self, image_paths, prompt, **kwargs) -> str:
+        if image_paths and image_paths[0] == self._bad_path:
+            raise ValueError("Vision response was not valid JSON: bad json")
+        return self._good_text
+
+    @property
+    def model_name(self) -> str:
+        return "stub"
+
+
+def test_scan_vision_error_on_one_batch_does_not_abort_the_scan(mock_drive, store):
+    """
+    A Gemini JSON-parse ValueError on batch 1 of 2 must not abort the scan:
+    batch 2 is still prepared, and batch 1 is recorded ItemStatus.ERROR with a
+    human-readable reason (PI-001 — one bad item must never discard completed
+    work for the rest of the run).
+    """
+    provider = _FlakyOnFirstBatchProvider("/cache/F1.jpg", _VISION_JSON)
+    summary = orchestrator.scan_and_prepare(provider, store)
+
+    # Batch 2 (Camera) still got prepared despite batch 1 failing.
+    assert {p.item_sku for p in summary.payloads} == {"LB-F2"}
+
+    # Batch 1 is recorded as an error with a human-readable (non-traceback) reason.
+    assert len(summary.errors) == 1
+    err = summary.errors[0]
+    assert err.batch_folder_id == "F1"
+    assert "ValueError" in err.reason
+    assert "Traceback" not in err.reason
+
+    # State store reflects the failure explicitly (ItemStatus.ERROR is now used).
+    rec = store.get_item("LB-F1")
+    assert rec is not None
+    assert rec.status is ItemStatus.ERROR
+
+    # The healthy batch was still recorded PRICED as usual.
+    assert store.get_item("LB-F2").status is ItemStatus.PRICED
+
+
+def test_scan_drive_fetch_error_on_one_batch_does_not_abort_the_scan(monkeypatch, store):
+    """
+    A DriveFetchError raised while downloading one batch's images must not
+    abort the scan: the other batch is still prepared and the failing batch
+    is recorded ItemStatus.ERROR (PI-001).
+    """
+    from src.core.drive_fetcher import DriveFetchError
+
+    batches = [
+        {"folder_id": "F1", "folder_name": "Headphones", "image_files": []},
+        {"folder_id": "F2", "folder_name": "Camera", "image_files": []},
+    ]
+    monkeypatch.setattr(orchestrator.drive_fetcher, "list_pending_batches", lambda: batches)
+
+    def _download(batch):
+        if batch["folder_id"] == "F1":
+            raise DriveFetchError(
+                batch_folder_id="F1", batch_folder_name="Headphones",
+                cause=ConnectionError("network down"),
+            )
+        return ([f"/cache/{batch['folder_id']}.jpg"], False)
+
+    monkeypatch.setattr(orchestrator.drive_fetcher, "download_batch_images", _download)
+
+    provider = _StubProvider(_VISION_JSON)
+    summary = orchestrator.scan_and_prepare(provider, store)
+
+    assert {p.item_sku for p in summary.payloads} == {"LB-F2"}
+    assert len(summary.errors) == 1
+    assert summary.errors[0].batch_folder_id == "F1"
+    assert "DriveFetchError" in summary.errors[0].reason
+
+    rec = store.get_item("LB-F1")
+    assert rec.status is ItemStatus.ERROR
+    assert store.get_item("LB-F2").status is ItemStatus.PRICED
+
+
+def test_scan_error_reason_is_truncated(monkeypatch, store):
+    """A very long exception message is capped (~300 chars) in the recorded reason."""
+    batches = [{"folder_id": "F1", "folder_name": "Headphones", "image_files": []}]
+    monkeypatch.setattr(orchestrator.drive_fetcher, "list_pending_batches", lambda: batches)
+    monkeypatch.setattr(
+        orchestrator.drive_fetcher,
+        "download_batch_images",
+        lambda batch: ([f"/cache/{batch['folder_id']}.jpg"], False),
+    )
+
+    class _HugeErrorProvider:
+        def generate_from_images(self, image_paths, prompt, **kwargs):
+            raise ValueError("x" * 5000)
+
+        @property
+        def model_name(self):
+            return "stub"
+
+    summary = orchestrator.scan_and_prepare(_HugeErrorProvider(), store)
+    assert len(summary.errors) == 1
+    assert len(summary.errors[0].reason) <= 300
+
+
+def test_scan_stale_cache_flag_propagates_to_summary(monkeypatch, store):
+    """
+    The stale-cache warning flag from download_batch_images (previously
+    discarded via `image_paths, _stale_warning = ...`) now propagates onto
+    the ScanSummary for the UI to display.
+    """
+    batches = [{"folder_id": "F1", "folder_name": "Headphones", "image_files": []}]
+    monkeypatch.setattr(orchestrator.drive_fetcher, "list_pending_batches", lambda: batches)
+    monkeypatch.setattr(
+        orchestrator.drive_fetcher,
+        "download_batch_images",
+        lambda batch: ([f"/cache/{batch['folder_id']}.jpg"], True),  # stale cache used
+    )
+
+    summary = orchestrator.scan_and_prepare(_StubProvider(_VISION_JSON), store)
+    assert summary.stale_cache is True
+    assert len(summary.payloads) == 1
+    assert summary.errors == []
+
+
+def test_scan_no_stale_cache_when_all_fresh(mock_drive, store):
+    """When no batch reports a stale-cache fallback, the summary flag is False."""
+    summary = orchestrator.scan_and_prepare(_StubProvider(_VISION_JSON), store)
+    assert summary.stale_cache is False
+
+
+def test_scan_summary_is_iterable_like_the_old_list_return(mock_drive, store):
+    """
+    Backward compatibility: ScanSummary supports iteration/len so callers
+    written against the old `list[ListingPayload]` return type still work.
+    """
+    summary = orchestrator.scan_and_prepare(_StubProvider(_VISION_JSON), store)
+    assert len(summary) == 2
+    assert {p.item_sku for p in summary} == {"LB-F1", "LB-F2"}
+
+
 # ── publish_approved ──────────────────────────────────────────────────────────
 
 
@@ -176,6 +322,78 @@ def test_publish_approved_dedup_no_double_publish(store):
     result = orchestrator.publish_approved(_full_payload(), store, ebay_client=client)
     assert client.published == []  # eBay never called
     assert result.listing_id == "OLD-LIST"
+
+
+# ── archive_batch wiring (bug fix: archive_batch previously had zero callers) ─
+
+
+def test_publish_approved_archives_batch(monkeypatch, store):
+    """A fresh publish archives the source Drive batch via drive_fetcher."""
+    archive_calls = []
+    monkeypatch.setattr(
+        orchestrator.drive_fetcher,
+        "archive_batch",
+        lambda folder_id, folder_name: archive_calls.append((folder_id, folder_name)),
+    )
+
+    client = _FakeEbayClient()
+    orchestrator.publish_approved(_full_payload(), store, ebay_client=client)
+
+    assert len(archive_calls) == 1
+    folder_id, _folder_name = archive_calls[0]
+    # derive_sku produces "LB-{folderId}"; the archive call must recover the
+    # original Drive folder id from the SKU.
+    assert folder_id == "F1"
+
+
+def test_publish_approved_dedup_hit_does_not_archive(monkeypatch, store):
+    """A dedup hit (already published) must not re-archive the batch."""
+    from src.contracts import ItemRecord
+
+    store.upsert_item(
+        ItemRecord(
+            item_sku="LB-F1",
+            batch_folder_id="F1",
+            status=ItemStatus.PUBLISHED,
+            offer_id="OLD-OFFER",
+            listing_id="OLD-LIST",
+        )
+    )
+    archive_calls = []
+    monkeypatch.setattr(
+        orchestrator.drive_fetcher,
+        "archive_batch",
+        lambda folder_id, folder_name: archive_calls.append((folder_id, folder_name)),
+    )
+
+    client = _FakeEbayClient()
+    orchestrator.publish_approved(_full_payload(), store, ebay_client=client)
+
+    assert archive_calls == []  # nothing to archive on a dedup hit
+
+
+def test_publish_approved_archive_failure_does_not_fail_publish(monkeypatch, store):
+    """
+    An archive_batch failure is logged/swallowed — the publish result must still
+    report success and the state store must still show PUBLISHED (R-STATE: the
+    publish itself is never rolled back by a downstream archive failure).
+    """
+
+    def _boom(folder_id, folder_name):
+        raise RuntimeError("Drive is down")
+
+    monkeypatch.setattr(orchestrator.drive_fetcher, "archive_batch", _boom)
+
+    client = _FakeEbayClient()
+    result = orchestrator.publish_approved(_full_payload(), store, ebay_client=client)
+
+    # Publish result unaffected by the archive failure.
+    assert result.offer_id == "OFFER-X"
+    assert result.listing_id == "LIST-X"
+    # State store still recorded the publish.
+    rec = store.get_item("LB-F1")
+    assert rec.status is ItemStatus.PUBLISHED
+    assert rec.offer_id == "OFFER-X"
 
 
 # ── fulfill_approved routing (v1.2) ───────────────────────────────────────────

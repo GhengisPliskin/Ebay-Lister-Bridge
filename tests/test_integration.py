@@ -159,6 +159,30 @@ def test_full_pipeline_scan_review_approve_publish(mocked_drive, store):
     assert len(client.published) == 2
 
 
+def test_full_pipeline_archives_batches_after_publish(mocked_drive, store, monkeypatch):
+    """
+    After a successful publish, the source Drive batch is archived (bug fix:
+    archive_batch previously had zero callers, so batches never left staging
+    and were re-scanned forever).
+    """
+    archive_calls = []
+    monkeypatch.setattr(
+        orchestrator.drive_fetcher,
+        "archive_batch",
+        lambda folder_id, folder_name: archive_calls.append(folder_id),
+    )
+
+    provider = _FakeProvider()
+    client = _FakeEbayClient()
+
+    payloads = orchestrator.scan_and_prepare(provider, store, ebay_client=client)
+    for payload in payloads:
+        orchestrator.publish_approved(payload, store, ebay_client=client)
+
+    # Both batches were archived, one call per published item.
+    assert sorted(archive_calls) == ["F1", "F2"]
+
+
 def test_resume_skips_published_and_does_not_republish(mocked_drive, store):
     """A re-scan after one item is live skips it; re-approve never double-publishes."""
     provider = _FakeProvider()

@@ -22,13 +22,14 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
-
-from dotenv import load_dotenv
 
 from src.contracts import ItemRecord, ItemStatus, TokenCacheRecord
+from src.core.paths import load_app_dotenv, resolve_app_path
 
-load_dotenv()
+# Frozen-aware .env discovery (tries the exe dir / %APPDATA%/ListerBridge
+# first when running as a PyInstaller onefile build; unchanged plain
+# load_dotenv() otherwise). See src/core/paths.py (R-STATE).
+load_app_dotenv()
 
 # Default DB location if STATE_STORE_DB_PATH is unset.
 _DEFAULT_DB_PATH = "data/state/lister_bridge.db"
@@ -44,7 +45,7 @@ def _utc_now_iso() -> str:
 
 def _resolve_db_path(db_path: str | None) -> str:
     """
-    Resolve the SQLite DB path, anchoring a relative path to the project root.
+    Resolve the SQLite DB path, anchoring a relative path to a run-safe root.
 
     Args:
         db_path: Explicit path, or None to read STATE_STORE_DB_PATH / default.
@@ -54,15 +55,17 @@ def _resolve_db_path(db_path: str | None) -> str:
 
     Side Effects:
         Creates the parent directory tree.
+
+    FMEA Constraints:
+        R-STATE — relative paths are anchored via resolve_app_path(), which
+        anchors to %APPDATA%/ListerBridge when frozen (PyInstaller onefile)
+        instead of the ephemeral sys._MEIPASS extraction dir, so the dedup DB
+        survives across runs of the packaged .exe.
     """
     raw = db_path or os.environ.get("STATE_STORE_DB_PATH") or _DEFAULT_DB_PATH
-    if not os.path.isabs(raw):
-        # Anchor to the project root (src/core/ -> src/ -> root) so the DB is
-        # consistent regardless of the invocation directory.
-        project_root = Path(__file__).parent.parent.parent
-        resolved = project_root / raw
-    else:
-        resolved = Path(raw)
+    # resolve_app_path anchors relative paths appropriately for the current
+    # runtime mode (frozen vs. source) and passes absolute paths through as-is.
+    resolved = resolve_app_path(raw)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     return str(resolved)
 

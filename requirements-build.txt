@@ -9,5 +9,10 @@
 # Python version caveat: build with Python 3.11 or 3.12 (the blueprint's 3.11+).
 # streamlit-desktop-app 0.3.4 explicitly excludes Python 3.13; on 3.13 pip falls
 # back to 0.3.3. Packaging is therefore pinned to a 3.11/3.12 build environment.
+#
+# NOTE (repo hygiene Fix 2): neither package below is installed in the
+# current test/dev environment (this env only runs the test suite, not the
+# packaging step), so their installed versions could not be verified via
+# `pip show` and they are left as loose lower bounds rather than guessed pins.
 streamlit-desktop-app>=0.3.3
 pyinstaller>=6.0

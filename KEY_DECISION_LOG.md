@@ -94,6 +94,15 @@ overwhelms user with raw JSON). Mitigations: color-highlighted diff view requiri
 - Task 0.5 is the highest-RPN convergence point (PI-003 + PI-007 + PI-008).
 - Terminal must use `colorama` or equivalent for color output.
 
+**Superseded (2026-07-03):** This decision is superseded by the Streamlit review/approve
+UI (`src/ui/app.py`, `src/ui/review.py`), packaged as a desktop `.exe` via PyInstaller
+(`desktop_app.py`, `packaging/lister_bridge.spec`). The CLI-based conversational loop
+described above was not carried into implementation. PI-007 (flawed-payload approval)
+and PI-008 (raw-JSON overwhelm) are now mitigated by the Streamlit Approve button and
+tidy photo/table summary rather than a color-highlighted terminal diff view. See
+`working/DOCUMENT_DRIFT_LOG.md` (Drift Entry — 2026-06-27, UI fact) and
+`ARCHITECTURE.md` for the current front end.
+
 ---
 
 ## DECISION 5 — Adopt Repomix for Codebase Context

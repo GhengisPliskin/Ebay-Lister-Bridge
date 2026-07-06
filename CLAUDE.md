@@ -8,7 +8,7 @@ Read it completely before taking any action.
 ## Project Identity
 
 **Repo:** `GhengisPliskin/Ebay-Lister-Bridge`
-**Stack:** Python 3, Google GenAI SDK, Google Drive API, eBay GraphQL API
+**Stack:** Python 3, Google GenAI SDK, Google Drive API, eBay REST API (Sell Inventory + Media)
 **Master Plan:** `docs/Ebay lister bridge master plan.md`
 
 ---

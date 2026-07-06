@@ -2,12 +2,13 @@
 Module: test_review.py
 Purpose: Tests for the Phase 5 Streamlit-free review helpers (src/ui/review.py).
          No Streamlit import, no network.
-FMEA Constraints Enforced (asserted): R-PRICE, PI-006, PI-009, PI-008.
+FMEA Constraints Enforced (asserted): R-PRICE, PI-006, PI-009, PI-008, PI-004.
 """
 
 from __future__ import annotations
 
 from src.contracts import ListingPayload, VisionAgentOutput
+from src.core import orchestrator
 from src.ui import review
 
 
@@ -77,6 +78,42 @@ def test_apply_operator_edits_overrides_only_given():
     assert edited.title == "New Title"
     assert edited.category_id == p.category_id  # unchanged
     assert p.price == 199.99  # original untouched (immutable copy)
+
+
+# ── description edits (PI-004: operator defect-disclosure corrections) ───────
+
+
+def test_apply_operator_edits_applies_description():
+    """A description edit is carried into listing_description (PI-004)."""
+    p = _payload(listing_description="Condition: Used.\nNo visible defects noted.")
+    edited = review.apply_operator_edits(
+        p, description="Condition: Used.\nNoted defects:\n- small scratch on lid"
+    )
+    assert edited.listing_description == (
+        "Condition: Used.\nNoted defects:\n- small scratch on lid"
+    )
+    # Original payload is untouched (immutable copy).
+    assert p.listing_description == "Condition: Used.\nNo visible defects noted."
+
+
+def test_apply_operator_edits_description_none_leaves_original():
+    """description=None leaves the original listing_description untouched."""
+    p = _payload(listing_description="Condition: Used.\nNo visible defects noted.")
+    edited = review.apply_operator_edits(p, price=149.0)
+    assert edited.listing_description == p.listing_description
+
+
+# ── condition enum (Fix 3: selectbox validation) ──────────────────────────────
+
+
+def test_ebay_condition_values_matches_orchestrator_condition_map():
+    """review.EBAY_CONDITION_VALUES covers exactly the orchestrator._CONDITION_MAP
+    target enum values (as a set), so the UI selectbox and the free-text mapper
+    agree on the canonical eBay condition vocabulary."""
+    expected = {enum_value for _, enum_value in orchestrator._CONDITION_MAP}
+    assert set(review.EBAY_CONDITION_VALUES) == expected
+    # No duplicates in the UI-facing list.
+    assert len(review.EBAY_CONDITION_VALUES) == len(set(review.EBAY_CONDITION_VALUES))
 
 
 # ── validation (PI-009) ───────────────────────────────────────────────────────

@@ -14,25 +14,25 @@ This section is populated from Step 0.0 (Intelligence Profiling). The human defi
 | Tier | Role | Assigned Model(s) | Max Context Window | Notes |
 |---|---|---|---|---|
 | **Tier 1** — Complex Reasoning & Multi-Constraint Logic | Margin-Guard Pricing & Market Analysis, 2% sub-ceiling GMV rule enforcement | Gemini 3 Flash (`thinking_level: HIGH`) | 32k tokens | Text-only context to minimize cost/latency while maximizing reasoning depth. |
-| **Tier 2** — Standard Execution & Coding | Image Extraction, Condition Assessment, Defect ID | Gemini 3 Flash (`media_resolution: HIGH`) | 1M tokens | Multimodal inputs; must output exact 2026 eBay GraphQL JSON schema. |
-| **Tier 3** — Boilerplate, Scaffolding, & Formatting | eBay GraphQL formatting, Title SEO generation | Standard Gemini 3 Flash | 8k tokens | Lightweight text processing. |
+| **Tier 2** — Standard Execution & Coding | Image Extraction, Condition Assessment, Defect ID | Gemini 3 Flash (`media_resolution: HIGH`) | 1M tokens | Multimodal inputs; must output the exact eBay REST Sell Inventory JSON shapes. |
+| **Tier 3** — Boilerplate, Scaffolding, & Formatting | eBay REST payload formatting, Title SEO generation | Standard Gemini 3 Flash | 8k tokens | Lightweight text processing. |
 
 ### Context Window Implications
 - Prompt headers for Tier 1 tasks must not exceed 2000 tokens of context preamble.
 - Repository map configuration (Repomix) must exclude image files, Google Drive payloads, and `working/` contents to stay within the smallest context window in active use.
-- The interactive terminal loop must maintain conversational context but should flush previous item contexts after a listing is approved to prevent token bloat.
+- The Streamlit review/approve session must hold conversational context per batch but should flush previous item contexts after a listing is approved to prevent token bloat. (Note: superseded from an originally planned interactive terminal loop — see §10 DECISION 4 and `KEY_DECISION_LOG.md`.)
 
 ---
 
 ## 2. Project Overview
 
 ### 2.1 Purpose
-The Lister-Bridge Hybrid Agent is an automated market research and eBay listing tool. It monitors Google Drive for incoming item photos, utilizes Gemini Multimodal Vision to extract details and establish a GMV-optimized "Margin-Guard" price, and uses an interactive terminal interface to resolve ambiguities with the user before publishing directly to eBay via the GraphQL API.
+The Lister-Bridge Hybrid Agent is an automated market research and eBay listing tool. It monitors Google Drive for incoming item photos, utilizes Gemini Multimodal Vision to extract details and establish a GMV-optimized "Margin-Guard" price, and uses a Streamlit review/approve interface to resolve ambiguities with the user before publishing directly to eBay via the REST Sell Inventory API (`createInventoryItem` → `createOffer` → `publishOffer`, plus the Media API for image upload). *(Amended per blueprint v1.1 — see §10 DECISION 4 and `KEY_DECISION_LOG.md` for the superseded original CLI/GraphQL plan.)*
 
 ### 2.2 Stakeholders
 | Role | Name / Team | Responsibilities |
 |---|---|---|
-| Owner / Lead | User | Final listing approval, answering terminal prompts, physical photo capture, API credential management |
+| Owner / Lead | User | Final listing approval, answering review-UI prompts, physical photo capture, API credential management |
 | Contributor | AI Agents | Code generation, schema formatting, market analysis, visual extraction |
 
 ### 2.3 Success Criteria
@@ -48,21 +48,21 @@ The Lister-Bridge Hybrid Agent is an automated market research and eBay listing 
 | ID | Requirement | Priority | Source |
 |---|---|---|---|
 | FR-001 | The system must use `.env` files and `.gitignore` to securely manage Gemini API keys, Google Service Account JSONs, and eBay OAuth 2.0 credentials. | Must | Architecture Decision |
-| FR-002 | The system must never execute the eBay GraphQL `startListingPreviewsCreation` mutation without explicit human confirmation via the CLI terminal. | Must | Architecture Decision |
+| FR-002 | The system must never publish via the eBay REST Sell Inventory sequence (`createInventoryItem` → `createOffer` → `publishOffer`) without explicit human confirmation via the review UI. *(Amended per blueprint v1.1 — originally specified as the GraphQL `startListingPreviewsCreation` mutation via a CLI terminal.)* | Must | Architecture Decision |
 | FR-003 | Image ingestion must be handled via the Google Drive API, pulling from a designated staging folder. | Must | Architecture Decision |
-| FR-004 | The system must utilize a multi-turn chat sequence in the terminal to ask the user for missing details (e.g., obscured model numbers) before finalizing the listing. | Must | Architecture Decision |
+| FR-004 | The system must present missing details (e.g., obscured model numbers) to the user in the Streamlit review UI before finalizing the listing. *(Amended per blueprint v1.1 — originally specified as a multi-turn terminal chat sequence.)* | Must | Architecture Decision |
 
 ### 3.2 Non-Functional Requirements
 | ID | Requirement | Category | Threshold |
 |---|---|---|---|
-| NFR-001 | The interactive terminal interface must clearly display the AI's question, proposed pricing, and status without overwhelming the user with raw JSON. | Usability | N/A |
+| NFR-001 | The Streamlit review/approve interface must clearly display the AI's question, proposed pricing, and status without overwhelming the user with raw JSON. | Usability | N/A |
 | NFR-002 | All `.py` files must include module-level docstrings, public function docstrings, and plain-English block comments on all non-trivial logic. AI sessions must not remove or truncate existing comments. | Code Quality | See `ARCHITECTURE.md` — "Code Comment Standard" section for format. Enforced via Ground Rule 11 and CONSTRAINTS.md C-004 through C-007. Zero exceptions. |
 
 ### 3.3 Constraints
 | ID | Constraint | Type | Impact |
 |---|---|---|---|
 | C-001 | FMEA Deferral | Procedural | Section 5 is populated. Risk analysis is active via the FMEA register. |
-| C-002 | eBay GraphQL Requirement | Tech Stack | Must use the 2026 eBay GraphQL schema, specifically the `startListingPreviewsCreation` mutation and `mappingReferenceID` for error tracking. |
+| C-002 | eBay REST Requirement | Tech Stack | Must use the eBay REST Sell Inventory publish sequence (`createInventoryItem` → `createOffer` → `publishOffer`) plus the Media API (`createImageFromFile`) for image upload. Amended per blueprint v1.1 — supersedes the original GraphQL `startListingPreviewsCreation` / `mappingReferenceID` requirement. |
 | C-003 | Python Environment | Tech Stack | Local execution environment restricted to Python to leverage `google-genai` and `google-api-python-client` libraries. |
 | C-004 | Module Docstrings Required | Code Quality | Every `.py` file must begin with a module-level docstring describing the file's purpose, primary responsibilities, and key interfaces. |
 | C-005 | Function Docstrings Required | Code Quality | Every public function must include a docstring describing parameters, return values, side effects, and any FMEA constraints it enforces. |
@@ -74,22 +74,34 @@ The Lister-Bridge Hybrid Agent is an automated market research and eBay listing 
 ## 4. Architecture & Directory Structure
 
 ### 4.1 High-Level Architecture
-The system is a Python-based CLI application. The **Orchestrator** polls a designated Google Drive folder for new item batches. For each item, the **Vision Agent** (Gemini `media_resolution: HIGH`) extracts visual data, and the **Logic Agent** (Gemini `thinking_level: HIGH`) calculates the Margin-Guard price.
+The system is a Python-based application with a Streamlit review/approve front end (packaged as a desktop `.exe` via PyInstaller). The **Orchestrator** polls a designated Google Drive folder for new item batches. For each item, the **Vision Agent** (Gemini `media_resolution: HIGH`) extracts visual data, and the **Logic Agent** (Gemini `thinking_level: HIGH`) calculates the Margin-Guard price.
 
-If data is missing, the Orchestrator pauses and drops into an interactive CLI loop, prompting the user for clarification. Once the user approves the generated listing data in the terminal, the payload is formatted to strictly match the 2026 schema and pushed to eBay via the GraphQL API.
+If data is missing, the operator resolves it in the Streamlit review UI, alongside the photos, extracted specifics, and suggested price. Once the operator clicks Approve, the payload is formatted to strictly match the eBay REST bodies and pushed via the Sell Inventory publish sequence (`createInventoryItem` → `createOffer` → `publishOffer`), with images uploaded first via the Media API. *(Amended per blueprint v1.1 — originally specified as an interactive CLI loop pushing to eBay via GraphQL; see §10 DECISION 4 and `KEY_DECISION_LOG.md`.)*
 
 ### 4.2 Directory Structure
 ```text
 lister-bridge/
 ├── src/
+│   ├── contracts/                # FROZEN pydantic data contracts
 │   ├── core/
-│   │   ├── orchestrator.py      # Main CLI loop and Drive API integration
-│   │   └── drive_fetcher.py     # Handles Google Drive IO
+│   │   ├── orchestrator.py      # Sequencing, per-item state, Drive API integration
+│   │   ├── drive_fetcher.py     # Handles Google Drive IO
+│   │   ├── state_store.py       # SQLite dedup/resume + token cache
+│   │   └── paths.py             # Frozen-aware .env / data-dir resolution
 │   ├── ai/
+│   │   ├── provider.py          # Swappable AI provider interface (Gemini default)
 │   │   ├── vision_agent.py      # High-res image ingestion & Gemini extraction
 │   │   └── margin_guard.py      # Pricing logic and market analysis
-│   └── api/
-│       └── ebay_graphql.py      # Formats and posts startListingPreviewsCreation
+│   ├── api/
+│   │   ├── ebay_auth.py         # OAuth refresh -> cached access token
+│   │   └── ebay_client.py       # Media upload + REST Sell Inventory publish sequence
+│   ├── marketplace/              # MarketplaceAdapter layer (v1.2) — eBay + generic draft
+│   └── ui/
+│       ├── app.py                # Streamlit review/approve front end (the human gate)
+│       └── review.py             # Pure, Streamlit-free review/validation helpers
+├── desktop_app.py                 # Desktop entry point — launches the Streamlit GUI
+├── packaging/
+│   └── lister_bridge.spec         # PyInstaller spec for the standalone .exe
 ├── tests/
 ├── docs/
 │   ├── FMEA.md
@@ -120,10 +132,12 @@ lister-bridge/
 
 | Component | Responsibility | Interfaces | Key Files |
 |---|---|---|---|
-| Core/IO | Fetching images from Drive, managing the CLI loop | Google Drive API, User Terminal | orchestrator.py, drive_fetcher.py |
+| Core/IO | Fetching images from Drive, sequencing, state/dedup | Google Drive API, State store | orchestrator.py, drive_fetcher.py, state_store.py |
 | AI/Vision | Extracting item specifics, condition, and defects | Core/IO, Gemini Multimodal | vision_agent.py |
 | AI/Logic | Establishing the Margin-Guard price | AI/Vision, Gemini standard | margin_guard.py |
-| API/eBay | Transforming internal JSON to GraphQL schema and posting | Core/IO, eBay GraphQL API | ebay_graphql.py |
+| API/eBay | Transforming internal JSON to the eBay REST bodies and posting | Core/IO, eBay Media + Sell Inventory + Browse REST APIs | ebay_auth.py, ebay_client.py |
+| Marketplace | Routing an approved listing to eBay (auto-publish) or a generic draft (draft-only) | UI, API/eBay | base.py, ebay_adapter.py, other_adapter.py |
+| UI | Streamlit review/approve human gate; desktop shell via PyInstaller | Core/IO, Marketplace | app.py, review.py, desktop_app.py |
 
 ---
 
@@ -139,7 +153,7 @@ lister-bridge/
 | PI-006 | Margin-Guard calculates unviable price | Item fails >80% 30-day sell-through rate goal | 8 | 3 | 6 | 144 | Hardcode deterministic floor function `(Cost+Fees)*1.15` that overrides AI | Open — mitigation planned | Product Owner |
 | PI-007 | User approves flawed payload | Bad listing goes live on eBay | 7 | 5 | 8 | 280 | CLI "Diff" View: Highlight critical changes in color, require typing `APPROVE` | Open — mitigation planned | UI/CLI Dev |
 | PI-008 | Terminal overwhelms user with raw JSON | User fatigue leading to "blind approvals" | 5 | 8 | 4 | 160 | Parse JSON into a clean, human-readable summary table in the CLI | Open — mitigation planned | UI/CLI Dev |
-| PI-009 | Payload fails 2026 GraphQL schema | Mutation rejection by eBay API | 7 | 5 | 2 | 70 | Enforce strict JSON Schema validation before sending the API request | Open — mitigation planned | Integration Dev |
+| PI-009 | Payload fails REST Sell Inventory / Media API validation | Request rejection by eBay API (`createInventoryItem`/`createOffer`/`publishOffer`) | 7 | 5 | 2 | 70 | Enforce strict pre-submit field validation before sending the API request | Open — mitigation planned | Integration Dev |
 
 ### Revision History
 

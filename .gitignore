@@ -17,3 +17,6 @@ build/
 dist/
 *.manifest
 build_log.txt
+
+# Local Claude Code settings — not part of the repo
+.claude/

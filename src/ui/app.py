@@ -4,18 +4,30 @@ Purpose: Streamlit review/approve front end — the human gate (PI-007). Scan ->
          review photos beside extracted data + suggested price -> Approve -> live
          listing link.
 Primary Responsibilities:
-  - Trigger a Scan (orchestrator.scan_and_prepare) and hold the prepared payloads.
+  - Trigger a Scan (orchestrator.scan_and_prepare) and hold the prepared payloads,
+    plus any per-batch scan errors and the stale-cache warning flag from the
+    returned ScanSummary, displaying both via st.error/st.warning so a failed
+    batch or a stale-cache fallback is visible to the operator instead of
+    being silently dropped.
   - Render each item: photos beside specifics/condition/defects + suggested price.
-  - Let the operator edit fields, enter a human-confirmed comp + cost/fees (with a
-    Terapeak / sold-search link), and recompute the price live.
+  - Let the operator edit fields (including the description, so PI-004 defect-
+    disclosure corrections are actually captured) via a validated condition
+    selectbox (src.ui.review.EBAY_CONDITION_VALUES) instead of free text, enter
+    a human-confirmed comp + cost/fees (with a Terapeak / sold-search link), and
+    recompute the price live.
   - Require an explicit Approve to publish (PI-007); then show the listing link.
-  - Offer optional in-GUI photo upload alongside Drive capture.
+  - Hold one EbayClient and one StateStore per Streamlit session (session_state,
+    created lazily) so the in-memory + persisted OAuth token cache (Fix 2) is
+    actually shared across Scan and Approve actions instead of being rebuilt
+    (and its cache lost) on every button click.
 Key Interfaces:
   - Input: Drive batches via the orchestrator; operator edits via Streamlit widgets.
   - Output: published eBay listings; state recorded in the state store.
 FMEA Constraints Enforced:
   - PI-007 — nothing publishes without an explicit Approve click.
   - PI-008 — a tidy summary (photos + table), never raw JSON.
+  - PI-004 — description edits are captured, not silently discarded; a dead,
+    non-functional upload widget was removed rather than left as a silent no-op.
   - R-PRICE — comp/cost/fees are operator inputs; price recomputes via Margin-Guard.
 
 Run:  streamlit run src/ui/app.py
@@ -42,6 +54,34 @@ def _get_store() -> StateStore:
     if "store" not in st.session_state:
         st.session_state["store"] = StateStore()
     return st.session_state["store"]
+
+
+def _get_ebay_client(store: StateStore) -> EbayClient:
+    """
+    Return a single, session-cached EbayClient, created lazily on first use.
+
+    Args:
+        store: The session's StateStore, forwarded into the client's EbayAuth so
+            the OAuth token cache is durable across a process restart (Fix 2:
+            R-AUTH / R-COST).
+
+    Returns:
+        The EbayClient stored in st.session_state, constructing it on first call.
+
+    Side Effects:
+        On first call, constructs one EbayClient (env-only; no network at
+        construction) and stores it in st.session_state for reuse by every
+        subsequent Scan/Approve action in this session.
+
+    FMEA Constraints:
+        R-AUTH / R-COST — reusing one EbayClient (and therefore one EbayAuth)
+        means the in-memory token cache and the state-store-backed cache both
+        actually help, instead of being rebuilt (and their in-memory half lost)
+        on every button click.
+    """
+    if "ebay_client" not in st.session_state:
+        st.session_state["ebay_client"] = EbayClient(state_store=store)
+    return st.session_state["ebay_client"]
 
 
 def _vision_from_payload(payload) -> VisionAgentOutput:
@@ -90,11 +130,23 @@ def _render_item(payload, store) -> None:
             {"Aspect": list(payload.item_specifics.keys()),
              "Value": list(payload.item_specifics.values())}
         )
-        condition = st.text_input(
-            "eBay condition", payload.condition, key=f"cond_{payload.item_sku}"
+        # Condition is a validated selectbox over the canonical eBay condition
+        # enum (mirrors orchestrator._CONDITION_MAP's target values; see
+        # src.ui.review.EBAY_CONDITION_VALUES) rather than free text, so an
+        # operator typo can never reach createInventoryItem as an invalid
+        # condition value.
+        condition_options = list(review.EBAY_CONDITION_VALUES)
+        if payload.condition not in condition_options:
+            # Defensive: keep the payload's current value selectable even if
+            # it somehow falls outside the canonical list (e.g. unset "").
+            condition_options = [payload.condition] + condition_options
+        condition = st.selectbox(
+            "eBay condition", condition_options,
+            index=condition_options.index(payload.condition),
+            key=f"cond_{payload.item_sku}",
         )
         st.markdown("**Description (defects disclosed — confirm before approving)**")
-        st.text_area(
+        description = st.text_area(
             "Description", payload.listing_description, key=f"desc_{payload.item_sku}",
             height=120,
         )
@@ -135,9 +187,12 @@ def _render_item(payload, store) -> None:
         )
 
         # ── Build the edited payload + validate before Approve (PI-009) ───────
+        # description is included so operator corrections to the PI-004
+        # defect-disclosure text are actually carried into the payload instead
+        # of being read by st.text_area and then discarded (Fix 3).
         edited = review.apply_operator_edits(
             payload, title=title, price=price, condition=condition,
-            category_id=category_id,
+            category_id=category_id, description=description,
         )
         problems = review.validate_for_publish(edited)
         if problems:
@@ -165,7 +220,7 @@ def _render_item(payload, store) -> None:
                      key=f"approve_{payload.item_sku}"):
             try:
                 result = orchestrator.fulfill_approved(
-                    edited, store, target=target, ebay_client=EbayClient(),
+                    edited, store, target=target, ebay_client=_get_ebay_client(store),
                 )
                 if isinstance(result, DraftOutput):
                     st.success(
@@ -189,7 +244,7 @@ def _render_item(payload, store) -> None:
 
 def main() -> None:
     """
-    Render the app: header, Scan trigger, optional upload, and the review cards.
+    Render the app: header, Scan trigger, and the review cards.
 
     Side Effects:
         Drives the whole Streamlit page.
@@ -200,21 +255,45 @@ def main() -> None:
 
     store = _get_store()
 
-    # Optional in-GUI upload alongside Drive capture (blueprint open option).
     with st.sidebar:
         st.header("Scan")
         if st.button("Scan Drive for new items"):
             try:
                 provider = GeminiProvider()
-                st.session_state["payloads"] = orchestrator.scan_and_prepare(
-                    provider, store, ebay_client=EbayClient()
+                # scan_and_prepare returns a ScanSummary (payloads + any
+                # per-batch errors + a stale-cache flag) rather than a bare
+                # list, so a single bad batch (e.g. a Gemini JSON parse
+                # failure or a DriveFetchError) no longer aborts the whole
+                # scan silently — its failure is surfaced below instead.
+                summary = orchestrator.scan_and_prepare(
+                    provider, store, ebay_client=_get_ebay_client(store)
                 )
+                st.session_state["payloads"] = summary.payloads
+                st.session_state["scan_errors"] = summary.errors
+                st.session_state["scan_stale_cache"] = summary.stale_cache
             except Exception as exc:
                 st.error(f"Scan failed: {type(exc).__name__}: {exc}")
-        st.file_uploader(
-            "Or upload photos directly", accept_multiple_files=True,
-            type=["jpg", "jpeg", "png", "webp", "heic"],
-        )
+
+        # Surface any per-batch failures and the stale-cache warning from the
+        # last scan (previously the stale_warning flag from
+        # download_batch_images was discarded entirely).
+        for err in st.session_state.get("scan_errors", []):
+            st.error(
+                f"Batch '{err.folder_name}' (id={err.batch_folder_id}) failed: "
+                f"{err.reason}"
+            )
+        if st.session_state.get("scan_stale_cache"):
+            st.warning(
+                "One or more items used a stale local image cache because a "
+                "Drive download failed; photos shown may be out of date."
+            )
+        # NOTE: the in-GUI "upload photos directly" widget was removed here.
+        # It captured a file_uploader() return value that was never read, so
+        # the advertised upload silently did nothing (a PI-004-class hazard:
+        # a control that appears functional but is not). Re-adding in-GUI
+        # upload requires actually wiring the returned UploadedFile objects
+        # into the pipeline (e.g. writing them to a batch dir and feeding
+        # drive_fetcher/orchestrator); out of scope for this fix.
 
     payloads = st.session_state.get("payloads", [])
     if not payloads:

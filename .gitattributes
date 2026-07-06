@@ -1,0 +1,14 @@
+# Line-ending normalization: without this, Git's core.autocrlf setting can
+# flip the whole working tree's line endings on checkout/commit (this
+# happened once already and produced a 3776-line noise diff with no real
+# content changes). These rules make line-ending handling explicit and
+# repo-controlled instead of depending on each contributor's local Git config.
+* text=auto
+
+*.py  text
+*.md  text
+*.spec text
+
+*.png binary
+*.jpg binary
+*.db  binary

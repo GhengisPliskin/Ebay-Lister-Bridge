@@ -2,7 +2,8 @@
 Module: test_drive_fetcher.py
 Purpose: Tests for the Phase 4 drive_fetcher enhancement — recursive subfolder
          traversal + full pageToken pagination — via a fake Drive service (no
-         network, no credentials).
+         network, no credentials). Also covers _load_cache_manifest robustness
+         (a corrupt manifest.json must degrade to a cold cache, not raise).
 FMEA Constraints Enforced (asserted): A-01 fix (recursion + pagination), PI-001 path.
 """
 
@@ -117,3 +118,69 @@ def test_helpers_paginate_fully(monkeypatch):
     out = drive_fetcher._list_all_files(_S(), "q", "files(id)")
     assert [f["id"] for f in out] == ["1", "2", "3"]
     assert calls["n"] == 3
+
+
+# ── _load_cache_manifest robustness (corrupt manifest -> cold cache) ─────────
+
+
+def test_load_cache_manifest_missing_returns_empty(tmp_path):
+    """No manifest.json at all -> empty dict (first run)."""
+    assert drive_fetcher._load_cache_manifest(str(tmp_path)) == {}
+
+
+def test_load_cache_manifest_corrupt_json_returns_empty(tmp_path):
+    """A malformed manifest.json is treated as a cold cache, not raised (PI-001)."""
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{not valid json!!", encoding="utf-8")
+
+    result = drive_fetcher._load_cache_manifest(str(tmp_path))
+
+    assert result == {}
+
+
+def test_load_cache_manifest_corrupt_json_scan_proceeds(fake_drive, tmp_path, monkeypatch):
+    """
+    A corrupt manifest does not block download_batch_images: the batch downloads
+    fresh (cold cache) instead of raising, and a fresh manifest is written.
+    """
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{not valid json!!", encoding="utf-8")
+
+    monkeypatch.setenv("DRIVE_CACHE_DIR", str(tmp_path))
+
+    # Fake the file download itself: get_media().execute()-style chunked read.
+    class _FakeDownloader:
+        def __init__(self, *a, **kw):
+            pass
+
+        def next_chunk(self):
+            return (None, True)
+
+    class _FakeMediaFiles:
+        def get_media(self, fileId):
+            return object()
+
+    class _FakeMediaService:
+        def files(self):
+            return _FakeMediaFiles()
+
+    monkeypatch.setattr(drive_fetcher, "_get_drive_service", lambda: _FakeMediaService())
+    monkeypatch.setattr(drive_fetcher, "MediaIoBaseDownload", lambda *a, **kw: _FakeDownloader())
+
+    batch = {
+        "folder_id": "F1",
+        "folder_name": "F1",
+        "image_files": [
+            {"file_id": "i1", "name": "a.jpg", "mime_type": "image/jpeg",
+             "modified_time": "2026-01-01T00:00:00Z"}
+        ],
+    }
+
+    local_paths, cache_fallback_used = drive_fetcher.download_batch_images(batch)
+
+    assert len(local_paths) == 1
+    assert cache_fallback_used is False
+    # A fresh manifest was written (the corrupt one was overwritten), and it
+    # now parses cleanly and contains the newly downloaded file.
+    fresh_manifest = drive_fetcher._load_cache_manifest(str(tmp_path))
+    assert "i1" in fresh_manifest

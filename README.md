@@ -2,8 +2,8 @@
 
 An automated market research and eBay listing tool. Monitors Google Drive for incoming
 item photos, uses Gemini Multimodal Vision to extract details and establish a
-GMV-optimized "Margin-Guard" price, and uses an interactive terminal interface to
-resolve ambiguities before publishing directly to eBay via the GraphQL API.
+GMV-optimized "Margin-Guard" price, and uses a Streamlit review/approve interface to
+resolve ambiguities before publishing directly to eBay via the REST Sell Inventory API.
 
 ---
 
@@ -19,14 +19,16 @@ resolve ambiguities before publishing directly to eBay via the GraphQL API.
 
 ## Architecture Overview
 
-The system is a Python-based CLI application. The **Orchestrator** polls a designated
-Google Drive folder for new item batches. For each item, the **Vision Agent**
-(Gemini `media_resolution: HIGH`) extracts visual data, and the **Logic Agent**
-(Gemini `thinking_level: HIGH`) calculates the Margin-Guard price.
+The system is a Python-based application with a Streamlit review/approve front end. The
+**Orchestrator** polls a designated Google Drive folder for new item batches. For each
+item, the **Vision Agent** (Gemini `media_resolution: HIGH`) extracts visual data, and
+the **Logic Agent** (Gemini `thinking_level: HIGH`) calculates the Margin-Guard price.
 
-If data is missing, the Orchestrator pauses and drops into an interactive CLI loop.
-Once the user types `APPROVE`, the payload is formatted and pushed to eBay via
-the `startListingPreviewsCreation` GraphQL mutation.
+If data is missing, the operator resolves it in the Streamlit review UI alongside the
+photos, extracted specifics, and suggested price. Once the operator clicks **Approve**,
+the payload is pushed to eBay via the REST Sell Inventory publish sequence
+(`createInventoryItem` → `createOffer` → `publishOffer`), with images uploaded first via
+the Media API.
 
 ---
 
@@ -35,14 +37,37 @@ the `startListingPreviewsCreation` GraphQL mutation.
 ```text
 lister-bridge/
 ├── src/
+│   ├── contracts/                # FROZEN pydantic data contracts
+│   │   ├── vision.py             # VisionAgentOutput (Vision -> Margin-Guard)
+│   │   ├── pricing.py            # MarginGuardOutput + ActiveCompRange
+│   │   ├── ebay.py               # ListingPayload + REST bodies + result shapes
+│   │   ├── adapter.py            # AdapterCapability + DraftOutput
+│   │   └── state.py              # ItemRecord / ItemStatus / TokenCacheRecord
 │   ├── core/
-│   │   ├── orchestrator.py      # Main CLI loop and Drive API integration
-│   │   └── drive_fetcher.py     # Handles Google Drive IO
+│   │   ├── orchestrator.py       # Sequencing, per-item state, Drive API integration
+│   │   ├── drive_fetcher.py      # Handles Google Drive IO
+│   │   ├── state_store.py        # SQLite dedup/resume + token cache
+│   │   └── paths.py              # Frozen-aware .env / data-dir resolution
 │   ├── ai/
-│   │   ├── vision_agent.py      # High-res image ingestion & Gemini extraction
-│   │   └── margin_guard.py      # Pricing logic and market analysis
-│   └── api/
-│       └── ebay_graphql.py      # Formats and posts startListingPreviewsCreation
+│   │   ├── provider.py           # Swappable AI provider interface (Gemini default)
+│   │   ├── vision_agent.py       # High-res image ingestion & Gemini extraction
+│   │   └── margin_guard.py       # Pricing logic and market analysis
+│   ├── api/
+│   │   ├── ebay_auth.py          # OAuth refresh -> cached access token
+│   │   └── ebay_client.py        # Media upload + REST Sell Inventory publish + Browse comps
+│   ├── marketplace/               # MarketplaceAdapter layer (v1.2)
+│   │   ├── base.py               # MarketplaceAdapter / AutoPublishAdapter / DraftAdapter
+│   │   ├── ebay_adapter.py       # Auto-publish adapter wrapping ebay_client
+│   │   └── other_adapter.py      # Draft-only adapter (Facebook Marketplace, Mercari, ...)
+│   └── ui/
+│       ├── app.py                 # Streamlit review/approve front end (the human gate)
+│       └── review.py              # Pure, Streamlit-free review/validation helpers
+├── desktop_app.py                 # Desktop entry point — launches the Streamlit GUI
+├── packaging/
+│   └── lister_bridge.spec         # PyInstaller spec for the standalone .exe
+├── scripts/
+│   ├── build_desktop.py           # Builds dist/lister-bridge.exe
+│   └── ebay_sandbox_spike.py      # Live/mocked end-to-end eBay de-risk runner
 ├── tests/
 ├── docs/
 │   ├── FMEA.md

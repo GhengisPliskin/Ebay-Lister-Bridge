@@ -7,7 +7,7 @@
 
 ## High-Level Architecture
 
-The system is a Python-based CLI application with four components:
+The system is a Python-based application with five components:
 
 ```
 [Google Drive Folder]
@@ -22,13 +22,13 @@ The system is a Python-based CLI application with four components:
 [AI/Logic — margin_guard.py]   ←── Gemini (thinking_level: HIGH, 32k ctx)
         │  marginGuardPrice + reasoning
         ▼
-[Core/IO — orchestrator.py]    ←── Interactive CLI (human-in-the-loop)
-        │  approved payload (after user types APPROVE)
+[UI — src/ui/app.py]           ←── Streamlit review/approve (human-in-the-loop, PI-007)
+        │  approved payload (after operator clicks Approve)
         ▼
-[API/eBay — ebay_graphql.py]
-        │  startListingPreviewsCreation mutation
+[API/eBay — ebay_client.py]
+        │  Media createImageFromFile → createInventoryItem → createOffer → publishOffer
         ▼
-[eBay GraphQL API]
+[eBay REST Sell Inventory + Media API]
 ```
 
 ---
@@ -45,17 +45,29 @@ lister-bridge/
 │   │   ├── ebay.py              # ListingPayload + REST bodies + result shapes
 │   │   └── state.py             # ItemRecord / ItemStatus / TokenCacheRecord
 │   ├── core/
-│   │   ├── orchestrator.py      # Sequencing, per-item state, context flush (stub)
-│   │   ├── state_store.py       # SQLite dedup/resume + token cache (stub)
-│   │   └── drive_fetcher.py     # Google Drive IO (built; pending recursion+pagination)
+│   │   ├── orchestrator.py      # Sequencing, per-item state, context flush
+│   │   ├── state_store.py       # SQLite dedup/resume + token cache
+│   │   ├── drive_fetcher.py     # Google Drive IO (recursive + fully paginated)
+│   │   └── paths.py             # Frozen-aware .env / data-dir resolution
 │   ├── ai/
-│   │   ├── provider.py          # Swappable AI provider interface (stub; Gemini default)
-│   │   ├── vision_agent.py      # Gemini extraction -> VisionAgentOutput (stub)
-│   │   └── margin_guard.py      # Active-comp + human + floor pricing (stub)
-│   └── api/
-│       ├── ebay_auth.py         # OAuth refresh -> cached access token (Phase 1 spike)
-│       └── ebay_client.py       # Browse comps, Media upload, REST publish (Phase 1 spike)
+│   │   ├── provider.py          # Swappable AI provider interface (Gemini default)
+│   │   ├── vision_agent.py      # Gemini extraction -> VisionAgentOutput
+│   │   └── margin_guard.py      # Active-comp + human + floor pricing
+│   ├── api/
+│   │   ├── ebay_auth.py         # OAuth refresh -> cached access token
+│   │   └── ebay_client.py       # Browse comps, Media upload, REST publish sequence
+│   ├── marketplace/             # MarketplaceAdapter layer (v1.2)
+│   │   ├── base.py              # MarketplaceAdapter / AutoPublishAdapter / DraftAdapter
+│   │   ├── ebay_adapter.py      # Auto-publish adapter wrapping ebay_client
+│   │   └── other_adapter.py     # Draft-only adapter (Facebook Marketplace, Mercari, ...)
+│   └── ui/
+│       ├── app.py               # Streamlit review/approve front end (the human gate)
+│       └── review.py            # Pure, Streamlit-free review/validation helpers
+├── desktop_app.py                # Desktop entry point — launches the Streamlit GUI
+├── packaging/
+│   └── lister_bridge.spec        # PyInstaller spec for the standalone .exe
 ├── scripts/
+│   ├── build_desktop.py         # Builds dist/lister-bridge.exe
 │   └── ebay_sandbox_spike.py    # Live/mocked end-to-end eBay de-risk runner
 ├── tests/
 ├── docs/
@@ -96,6 +108,8 @@ lister-bridge/
 | AI/Vision | Extracting item specifics, condition, and defects | Core/IO, AI provider | `provider.py`, `vision_agent.py` |
 | AI/Logic | Establishing the Margin-Guard price | AI/Vision, eBay Browse comps | `margin_guard.py` |
 | API/eBay | OAuth, Media image upload, REST Inventory publish | Core/IO, eBay Media + Sell Inventory + Browse REST APIs | `ebay_auth.py`, `ebay_client.py` |
+| Marketplace | Routes an approved listing to eBay (auto-publish) or a generic draft (draft-only) | UI, API/eBay | `base.py`, `ebay_adapter.py`, `other_adapter.py` |
+| UI | Streamlit review/approve human gate (PI-007); desktop shell via PyInstaller | Core/IO, Marketplace | `app.py`, `review.py`, `desktop_app.py` |
 
 ---
 
@@ -103,9 +117,9 @@ lister-bridge/
 
 | Tier | Model | Context | Used For |
 |---|---|---|---|
-| Tier 1 | Gemini 3 Flash (`thinking_level: HIGH`) | 32k tokens | Margin-Guard pricing, GraphQL integration |
+| Tier 1 | Gemini 3 Flash (`thinking_level: HIGH`) | 32k tokens | Margin-Guard pricing, REST integration |
 | Tier 2 | Gemini 3 Flash (`media_resolution: HIGH`) | 1M tokens | Vision extraction, orchestrator |
-| Tier 3 | Gemini 3 Flash (standard) | 8k tokens | Title SEO, eBay GraphQL formatting |
+| Tier 3 | Gemini 3 Flash (standard) | 8k tokens | Title SEO, eBay REST payload formatting |
 
 ---
 

@@ -30,7 +30,6 @@ import os
 from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
 
 from src.api.ebay_auth import EbayAuth
 from src.contracts import (
@@ -48,8 +47,12 @@ from src.contracts import (
     PublishResult,
     ShipToLocationAvailability,
 )
+from src.core.paths import load_app_dotenv
 
-load_dotenv()
+# Frozen-aware .env discovery (tries the exe dir / %APPDATA%/ListerBridge
+# first under a PyInstaller onefile build; unchanged plain load_dotenv()
+# otherwise). See src/core/paths.py (R-STATE).
+load_app_dotenv()
 
 # ── Host selection (blueprint: sandbox-first) ─────────────────────────────────
 # The Sell Inventory + Browse APIs share the api[.sandbox].ebay.com host; the
@@ -110,6 +113,7 @@ class EbayClient:
         *,
         marketplace_id: str | None = None,
         session: requests.Session | None = None,
+        state_store=None,
     ) -> None:
         """
         Configure the client.
@@ -119,6 +123,10 @@ class EbayClient:
             env: "sandbox"/"production"; defaults to EBAY_ENV (then "sandbox").
             marketplace_id: e.g. "EBAY_US"; defaults to EBAY_MARKETPLACE_ID.
             session: Optional injected requests.Session (tests pass a mock).
+            state_store: Optional state_store.StateStore, forwarded to the
+                auto-constructed EbayAuth so its token cache is durable across
+                process restarts (R-AUTH / R-COST). Ignored if `auth` is
+                already provided (the caller owns that EbayAuth's wiring).
 
         Returns:
             None
@@ -129,7 +137,7 @@ class EbayClient:
         self.env = (env or os.environ.get("EBAY_ENV") or "sandbox").lower()
         if self.env not in _API_HOSTS:
             raise EbayClientError(f"Unknown EBAY_ENV '{self.env}' (expected sandbox|production)")
-        self.auth = auth or EbayAuth(env=self.env, session=session)
+        self.auth = auth or EbayAuth(env=self.env, session=session, state_store=state_store)
         self.marketplace_id = (
             marketplace_id or os.environ.get("EBAY_MARKETPLACE_ID") or "EBAY_US"
         )

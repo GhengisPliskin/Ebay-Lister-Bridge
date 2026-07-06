@@ -17,7 +17,7 @@
 | PI-006 | Margin-Guard calculates unviable price | Item fails >80% 30-day sell-through rate goal | 8 | 3 | 6 | 144 | Hardcode deterministic floor function `(Cost+Fees)*1.15` that overrides AI | Open — mitigation planned | Product Owner |
 | PI-007 | User approves flawed payload | Bad listing goes live on eBay | 7 | 5 | 8 | 280 | CLI "Diff" View: Highlight critical changes in color, require typing `APPROVE` | Open — mitigation planned | UI/CLI Dev |
 | PI-008 | Terminal overwhelms user with raw JSON | User fatigue leading to "blind approvals" | 5 | 8 | 4 | 160 | Parse JSON into a clean, human-readable summary table in the CLI | Open — mitigation planned | UI/CLI Dev |
-| PI-009 | Payload fails 2026 GraphQL schema | Mutation rejection by eBay API | 7 | 5 | 2 | 70 | Enforce strict JSON Schema validation before sending the API request | Open — mitigation planned | Integration Dev |
+| PI-009 | Payload fails REST Sell Inventory / Media API validation | Request rejection by eBay API (`createInventoryItem`/`createOffer`/`publishOffer`) | 7 | 5 | 2 | 70 | Enforce strict pre-submit field validation before sending the API request | Open — mitigation planned | Integration Dev |
 
 ---
 

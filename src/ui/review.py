@@ -7,7 +7,11 @@ Purpose: Pure, Streamlit-free helpers for the review/approve screen — comp-sea
 Primary Responsibilities:
   - Build the operator's Terapeak / sold-comp research links (human-in-the-loop).
   - Recompute the Margin-Guard price when the operator enters a comp / cost / fees.
-  - Apply operator edits to a ListingPayload immutably.
+  - Apply operator edits (including description corrections) to a ListingPayload
+    immutably.
+  - Expose the canonical eBay condition enum for the UI's condition selectbox,
+    mirroring orchestrator._CONDITION_MAP without importing streamlit-side code
+    into core.
   - Report pre-publish validation problems + remaining missing inputs.
 Key Interfaces:
   - Input: VisionAgentOutput, MarginGuardOutput, ListingPayload + operator edits.
@@ -16,6 +20,8 @@ FMEA Constraints Enforced:
   - PI-006 / R-PRICE — recompute routes through margin_guard (floor + missing_inputs).
   - PI-009 — validate_for_publish reuses EbayClient.validate_offer before Approve.
   - PI-008 — surfaces tidy fields (no raw JSON) for the UI to render.
+  - PI-004 — apply_operator_edits carries operator corrections to the defect-
+    disclosure description through to the payload instead of discarding them.
 """
 
 from __future__ import annotations
@@ -29,6 +35,22 @@ from src.contracts import ListingPayload, MarginGuardOutput, VisionAgentOutput
 # eBay marketplace used for the research links.
 _SOLD_SEARCH_BASE = "https://www.ebay.com/sch/i.html"
 _TERAPEAK_BASE = "https://www.ebay.com/sh/research"
+
+# Canonical eBay condition enum values, in the same order as (and mirroring)
+# orchestrator._CONDITION_MAP's target values (deduplicated, order-preserved).
+# Kept here — rather than imported from orchestrator — so app.py (a Streamlit
+# module) never needs to import core orchestrator internals just to populate a
+# selectbox; if _CONDITION_MAP's target set changes, update this list to match.
+EBAY_CONDITION_VALUES: list[str] = [
+    "FOR_PARTS_OR_NOT_WORKING",
+    "LIKE_NEW",
+    "NEW_OTHER",
+    "NEW",
+    "USED_EXCELLENT",
+    "USED_VERY_GOOD",
+    "USED_ACCEPTABLE",
+    "USED_GOOD",
+]
 
 
 def build_sold_comp_url(query: str) -> str:
@@ -118,6 +140,7 @@ def apply_operator_edits(
     condition: str | None = None,
     category_id: str | None = None,
     item_specifics: dict[str, str] | None = None,
+    description: str | None = None,
 ) -> ListingPayload:
     """
     Return a copy of the payload with the operator's edits applied.
@@ -129,12 +152,20 @@ def apply_operator_edits(
         condition: Edited eBay condition enum, if changed.
         category_id: Edited eBay category ID, if changed.
         item_specifics: Edited aspects map, if changed.
+        description: Edited listing description, if changed. Operator
+            corrections here matter because the description is where PI-004
+            defect disclosures live — leaving this unread from the UI silently
+            discards operator fixes to defect-disclosure text.
 
     Returns:
         A new ListingPayload with the provided fields overridden (others kept).
 
     Side Effects:
         None (pydantic model_copy is immutable-style).
+
+    FMEA Constraints:
+        PI-004 — description edits (defect disclosures) are applied like every
+        other field; None leaves the original text untouched.
     """
     updates: dict = {}
     if title is not None:
@@ -147,6 +178,8 @@ def apply_operator_edits(
         updates["category_id"] = category_id
     if item_specifics is not None:
         updates["item_specifics"] = item_specifics
+    if description is not None:
+        updates["listing_description"] = description
     return payload.model_copy(update=updates)
 
 
