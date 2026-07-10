@@ -2,7 +2,10 @@
 Module: app.py
 Purpose: Streamlit review/approve front end — the human gate (PI-007). Scan ->
          review photos beside extracted data + suggested price -> Approve -> live
-         listing link.
+         listing link. Also hosts the Setup tab: a guided credential-entry wizard
+         with per-service live-validation Test buttons, so a new user can hand-
+         author their .env from within the app instead of editing .env.example
+         blind.
 Primary Responsibilities:
   - Trigger a Scan (orchestrator.scan_and_prepare) and hold the prepared payloads,
     plus any per-batch scan errors and the stale-cache warning flag from the
@@ -20,18 +23,36 @@ Primary Responsibilities:
     created lazily) so the in-memory + persisted OAuth token cache (Fix 2) is
     actually shared across Scan and Approve actions instead of being rebuilt
     (and its cache lost) on every button click.
+  - Render a "Setup" tab (per-service expanders driven by src.core.settings):
+    credential inputs (masked for secret fields), a portal link + one-line
+    guidance per service, a "Test" button invoking the matching validator, and
+    a "Save settings" button that writes the .env via settings.write_settings.
+    Also shows a startup warning banner naming any still-missing required keys.
+  - Render a "Help" tab (src.ui.help_content.HELP_SECTIONS): static operator
+    guidance covering the workflow, error/warning meanings, data locations,
+    platform coverage, and safety notes. Attach short contextual hints
+    (src.ui.help_content.TIPS) to the Scan/condition/description/Approve
+    widgets via their help= parameter, and append the error-banner /
+    stale-cache tips to the existing st.error/st.warning messages.
 Key Interfaces:
-  - Input: Drive batches via the orchestrator; operator edits via Streamlit widgets.
-  - Output: published eBay listings; state recorded in the state store.
+  - Input: Drive batches via the orchestrator; operator edits via Streamlit widgets;
+    credential values entered on the Setup tab.
+  - Output: published eBay listings; state recorded in the state store; a
+    written .env file (Setup tab).
 FMEA Constraints Enforced:
   - PI-007 — nothing publishes without an explicit Approve click.
   - PI-008 — a tidy summary (photos + table), never raw JSON.
   - PI-004 — description edits are captured, not silently discarded; a dead,
     non-functional upload widget was removed rather than left as a silent no-op.
   - R-PRICE — comp/cost/fees are operator inputs; price recomputes via Margin-Guard.
+  - R-STATE — Setup writes to the exact .env path load_app_dotenv() itself
+    searches (src.core.settings.settings_env_path), so saved credentials are
+    the ones the app actually loads on next run.
 
 Run:  streamlit run src/ui/app.py
-This module is a thin shell; the testable logic lives in src/ui/review.py.
+This module is a thin shell; the testable logic lives in src/ui/review.py,
+src/core/settings.py, and src/ui/help_content.py (none of which import
+streamlit).
 """
 
 from __future__ import annotations
@@ -44,9 +65,11 @@ from src.ai.provider import GeminiProvider
 from src.api.ebay_client import EbayClient
 from src.contracts import DraftOutput, VisionAgentOutput
 from src.core import orchestrator
+from src.core import settings as settings_logic
 from src.core.state_store import StateStore
 from src import marketplace
 from src.ui import review
+from src.ui.help_content import HELP_SECTIONS, TIPS
 
 
 def _get_store() -> StateStore:
@@ -144,11 +167,13 @@ def _render_item(payload, store) -> None:
             "eBay condition", condition_options,
             index=condition_options.index(payload.condition),
             key=f"cond_{payload.item_sku}",
+            help=TIPS["condition_select"],
         )
         st.markdown("**Description (defects disclosed — confirm before approving)**")
         description = st.text_area(
             "Description", payload.listing_description, key=f"desc_{payload.item_sku}",
             height=120,
+            help=TIPS["description_editor"],
         )
 
         # ── Human-in-the-loop pricing (R-PRICE) ───────────────────────────────
@@ -217,7 +242,7 @@ def _render_item(payload, store) -> None:
 
         # ── The human gate (PI-007) ───────────────────────────────────────────
         if st.button(button_label, disabled=(bool(problems) and not is_draft),
-                     key=f"approve_{payload.item_sku}"):
+                     key=f"approve_{payload.item_sku}", help=TIPS["approve_button"]):
             try:
                 result = orchestrator.fulfill_approved(
                     edited, store, target=target, ebay_client=_get_ebay_client(store),
@@ -242,22 +267,25 @@ def _render_item(payload, store) -> None:
                 st.error(f"Action failed: {type(exc).__name__}: {exc}")
 
 
-def main() -> None:
+def _render_review_tab(store: StateStore) -> None:
     """
-    Render the app: header, Scan trigger, and the review cards.
+    Render the existing "Review & approve" tab: Scan sidebar + review cards.
+
+    This is the pre-Setup-tab behavior of main(), moved (not rewritten) into
+    its own function so main() can host it alongside the new Setup tab via
+    st.tabs without altering any of its logic.
+
+    Args:
+        store: The session's StateStore.
 
     Side Effects:
-        Drives the whole Streamlit page.
+        Draws the Scan sidebar controls and, for each prepared payload, one
+        review card (see _render_item). May trigger a Drive scan or an eBay
+        publish/draft action.
     """
-    st.set_page_config(page_title="Lister-Bridge", layout="wide")
-    st.title("Lister-Bridge — review & approve")
-    st.caption("Scan Drive → review photos against extracted data → Approve to publish.")
-
-    store = _get_store()
-
     with st.sidebar:
         st.header("Scan")
-        if st.button("Scan Drive for new items"):
+        if st.button("Scan Drive for new items", help=TIPS["scan_button"]):
             try:
                 provider = GeminiProvider()
                 # scan_and_prepare returns a ScanSummary (payloads + any
@@ -282,11 +310,13 @@ def main() -> None:
                 f"Batch '{err.folder_name}' (id={err.batch_folder_id}) failed: "
                 f"{err.reason}"
             )
+            st.caption(TIPS["error_banner"])
         if st.session_state.get("scan_stale_cache"):
             st.warning(
                 "One or more items used a stale local image cache because a "
                 "Drive download failed; photos shown may be out of date."
             )
+            st.caption(TIPS["stale_cache"])
         # NOTE: the in-GUI "upload photos directly" widget was removed here.
         # It captured a file_uploader() return value that was never read, so
         # the advertised upload silently did nothing (a PI-004-class hazard:
@@ -303,6 +333,183 @@ def main() -> None:
     for payload in payloads:
         _render_item(payload, store)
         st.divider()
+
+
+def _render_portal_links(service: str) -> None:
+    """
+    Render the portal link(s) + one-line guidance for a Setup group.
+
+    Args:
+        service: The SettingsGroup.service key (also the src.core.settings
+            PORTAL_LINKS lookup key).
+
+    Side Effects:
+        Draws one st.markdown line per PortalLink registered for `service`.
+        No-op if the service has no registered links.
+    """
+    for link in settings_logic.PORTAL_LINKS.get(service, ()):
+        st.markdown(f"[{link.label}]({link.url})")
+        st.caption(link.guidance)
+
+
+def _render_setup_group(group, values: dict) -> None:
+    """
+    Render one Setup expander: inputs for every field in `group`, a portal
+    link + guidance, and a "Test" button that runs the group's validator.
+
+    Args:
+        group: A src.core.settings.SettingsGroup.
+        values: The in-progress settings dict (st.session_state-backed); each
+            input widget both displays and updates this dict in place.
+
+    Side Effects:
+        Draws an st.expander containing one input per field (masked for
+        secret-flagged fields), the group's portal links, and — for groups
+        with a registered validator — a "Test" button that calls it and
+        renders st.success/st.error with the result.
+    """
+    with st.expander(group.title, expanded=False):
+        _render_portal_links(group.service)
+        for field_ in group.fields:
+            widget_key = f"setup_{field_.key}"
+            values[field_.key] = st.text_input(
+                field_.label,
+                value=values.get(field_.key, field_.default),
+                help=field_.help_text,
+                type="password" if field_.secret else "default",
+                key=widget_key,
+            )
+
+        validator = _SETUP_VALIDATORS.get(group.service)
+        if validator is not None:
+            if st.button(f"Test {group.title}", key=f"test_{group.service}"):
+                result = validator(values)
+                if result.ok:
+                    st.success(result.message)
+                else:
+                    st.error(result.message)
+
+
+# Maps a SettingsGroup.service id to its src.core.settings validator. Draft
+# platforms (facebook_marketplace / mercari) are intentionally absent — they
+# carry no credentials, only links (rendered separately, see _render_setup_tab).
+_SETUP_VALIDATORS = {
+    "google_drive": settings_logic.validate_drive,
+    "gemini": settings_logic.validate_gemini,
+    "ebay": settings_logic.validate_ebay,
+}
+
+
+def _render_setup_tab() -> None:
+    """
+    Render the "Setup" tab: per-service credential entry, portal links, Test
+    buttons, and a Save settings action.
+
+    Side Effects:
+        On first render this session, seeds st.session_state["setup_values"]
+        from settings.read_settings(). Draws one expander per SETTINGS_SCHEMA
+        group plus a draft-platform links section, and a "Save settings"
+        button that calls settings.write_settings and reports the written path.
+
+    FMEA Constraints:
+        R-STATE — "Save settings" writes to settings.settings_env_path(), the
+        exact path load_app_dotenv() searches, so a restart of the app picks
+        up what was just saved here.
+    """
+    if "setup_values" not in st.session_state:
+        st.session_state["setup_values"] = settings_logic.read_settings()
+    values = st.session_state["setup_values"]
+
+    st.caption(
+        "Enter credentials per service below, use **Test** to verify each one "
+        "live, then **Save settings** to write your `.env` file."
+    )
+
+    for group in settings_logic.SETTINGS_SCHEMA:
+        _render_setup_group(group, values)
+
+    with st.expander("Draft platforms (no credentials needed)", expanded=False):
+        st.caption(
+            "These platforms don't support API publishing here — Lister-Bridge "
+            "generates a listing draft locally, which you paste in manually."
+        )
+        _render_portal_links("facebook_marketplace")
+        _render_portal_links("mercari")
+
+    if st.button("Save settings", key="setup_save"):
+        written_path = settings_logic.write_settings(values)
+        st.success(
+            f"Settings saved to `{written_path}`. "
+            "Restart Lister-Bridge for the new settings to take effect."
+        )
+        # R-STATE: an .env sitting next to the .exe outranks the file Setup
+        # writes (load_app_dotenv checks the exe directory first) — warn the
+        # operator instead of letting their saved values be shadowed silently.
+        shadow = settings_logic.shadowing_env_path()
+        if shadow is not None:
+            st.warning(
+                f"A `.env` file also exists at `{shadow}`, which takes "
+                "precedence over the saved settings. Delete or update that "
+                "file, or your changes here will be ignored."
+            )
+
+
+def _render_help_tab() -> None:
+    """
+    Render the "Help" tab: the static operator tip sheet from help_content.
+
+    Side Effects:
+        Draws one st.subheader + st.markdown pair per entry in
+        src.ui.help_content.HELP_SECTIONS, in order.
+
+    FMEA Constraints:
+        PI-004 / PI-007 — the "Safety notes" and "Platforms" sections restate
+        the defect-disclosure and eBay-vs-draft publish semantics also
+        surfaced as contextual tips elsewhere in this module, so an operator
+        who skips the tooltips still encounters them here.
+    """
+    for heading, body in HELP_SECTIONS:
+        st.subheader(heading)
+        st.markdown(body)
+
+
+def main() -> None:
+    """
+    Render the app: header, missing-credential banner, and the Review/Setup tabs.
+
+    Side Effects:
+        Drives the whole Streamlit page.
+
+    FMEA Constraints:
+        R-STATE — the missing-required check reads the same .env
+        (settings.read_settings) that Setup writes to, so the banner reflects
+        the operator's actual current configuration.
+    """
+    st.set_page_config(page_title="Lister-Bridge", layout="wide")
+    st.title("Lister-Bridge — review & approve")
+    st.caption("Scan Drive → review photos against extracted data → Approve to publish.")
+
+    # Startup banner: if required credentials are missing, tell the operator
+    # to complete Setup rather than letting a later, less legible failure
+    # surface deep in the Scan/Approve pipeline.
+    current_values = settings_logic.read_settings()
+    missing = settings_logic.missing_required(current_values)
+    if missing:
+        st.warning(
+            "Setup is incomplete — missing required settings: "
+            + ", ".join(missing)
+            + ". Complete them in the **Setup** tab below."
+        )
+
+    store = _get_store()
+
+    review_tab, setup_tab, help_tab = st.tabs(["Review & approve", "Setup", "Help"])
+    with review_tab:
+        _render_review_tab(store)
+    with setup_tab:
+        _render_setup_tab()
+    with help_tab:
+        _render_help_tab()
 
 
 if __name__ == "__main__":

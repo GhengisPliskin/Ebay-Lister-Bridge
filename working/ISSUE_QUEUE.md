@@ -163,3 +163,85 @@ Per DOCUMENT_DRIFT_LOG entry 2026-06-27: README, ARCHITECTURE, CONSTRAINTS C-002
 - [ ] WAL mode + `busy_timeout` enabled.
 - [ ] Publish claims the SKU transactionally (e.g. write a PUBLISHING status row) before calling eBay; second concurrent approve becomes a dedup no-op.
 - [ ] Concurrency test exercising two threads approving the same SKU.
+
+## Issue: Guided credential setup wizard with per-credential validation
+**Labels:** feature, high, ui
+**Milestone:** Phase 7 (usability)
+**Depends on:** None
+**Assignee:** ai-with-review
+
+New users must currently hand-author a `.env` from `.env.example` — the largest onboarding barrier for the packaged .exe. Add a Setup page to the Streamlit app: step-by-step credential entry for Google Drive (service-account JSON + folder IDs), Gemini (API key), and eBay (client ID/secret, refresh token, policies), each with a link to the issuing portal and a Test button that verifies the credential live. Facebook Marketplace and Mercari appear as no-credential draft platforms with links to their posting pages.
+
+### Acceptance Criteria
+- [ ] Validation + env-file read/write logic lives in a non-Streamlit module (testable without streamlit installed); the Streamlit page only renders.
+- [ ] Test buttons: Drive → 1-item files.list on the staging folder; Gemini → cheap model call; eBay → token refresh via EbayAuth. Failures shown human-readable, never a traceback (PI-001 spirit).
+- [ ] Saves to `%APPDATA%\ListerBridge\.env` when frozen, project `.env` otherwise (must match `load_app_dotenv` search order). Secrets masked in UI; never logged.
+- [ ] App startup with missing required config lands on Setup with a banner instead of failing.
+- [ ] Unit tests: env write/read round-trip, validators against fakes (success + failure), frozen/non-frozen target path.
+
+## Issue: In-app tip sheet — sidebar contextual tips + Help tab
+**Labels:** feature, medium, ui
+**Milestone:** Phase 7 (usability)
+**Depends on:** None
+**Assignee:** ai-with-review
+
+Operators have no in-app guidance on the workflow (Drive batch → Scan → review/edit → Approve → archive) or on what errors mean. Add short contextual hints beside the main controls and a Help tab containing the end-to-end workflow, field explanations, error/warning meanings (ItemStatus.ERROR reasons, stale-cache warning), where state lives, and the PI-004 defect-disclosure responsibility.
+
+### Acceptance Criteria
+- [ ] Help content lives as constants in a non-Streamlit module (testable; single source of truth).
+- [ ] Sidebar/inline hints at: Scan button, condition selectbox, description editor, Approve button, error banners.
+- [ ] Help tab covers: prerequisites, Drive folder conventions, scan→approve walkthrough, error meanings, state/cache locations (frozen vs dev), platform notes (eBay auto-publish vs FB/Mercari drafts).
+- [ ] Test asserts help content covers all supported platforms from `other_adapter.supported_platforms()` plus eBay.
+
+## Issue: Setup handholding Tier 1 — smart inputs and per-field walkthroughs
+**Labels:** feature, high, ui, onboarding
+**Milestone:** Phase 7 (usability)
+**Depends on:** None
+**Assignee:** ai-with-review
+
+The wizard collects values but doesn't help obtain them. Lowest-effort/highest-value fixes: (a) Drive folder fields accept a pasted full Drive URL and extract the folder ID automatically; (b) after the service-account JSON is provided, surface the `client_email` from it with a copy button and the explicit instruction "share both Drive folders with this address" (the #1 silent Drive failure); (c) JSON path field validates existence/parseability on blur, not just at Test; (d) every field gets a "Where do I find this?" expander with numbered click-path instructions (portal → menu → button), maintained in `src/core/settings.py` schema so it stays testable; (e) a setup progress checklist at the top of the tab (per-service: not started / saved / test passed), persisted in the state store so it survives restarts.
+
+### Acceptance Criteria
+- [ ] Pasting a Drive folder URL into either folder field stores the bare ID; unit-tested parser in settings.py.
+- [ ] Service-account email displayed with share instruction once JSON is valid.
+- [ ] Per-field walkthrough text lives in the schema (non-Streamlit, tested for coverage of every required field).
+- [ ] Progress checklist reflects saved + last-test-result per service across restarts.
+
+## Issue: Setup handholding Tier 2 — fetch-and-pick for eBay policy IDs and location
+**Labels:** feature, high, api, onboarding
+**Milestone:** Phase 7 (usability)
+**Depends on:** Tier 1
+**Assignee:** ai-with-review
+
+Users currently paste five opaque eBay IDs (fulfillment/payment/return policy, inventory location, default category). Once client ID/secret/refresh token validate, the wizard should fetch the user's actual business policies (Sell Account API `getFulfillmentPolicies` etc.) and inventory locations (`getInventoryLocations`) and present dropdowns instead of paste boxes. If none exist, link to the Seller Hub business-policies page with instructions. Fetch logic in a non-Streamlit module with injectable session, mirroring EbayAuth/EbayClient patterns.
+
+### Acceptance Criteria
+- [ ] "Fetch my policies" button populates dropdowns from live API; selection writes the IDs to settings.
+- [ ] Empty-result path shows Seller Hub link + guidance, not an error.
+- [ ] Unit tests with FakeSession for populated and empty responses.
+
+## Issue: Setup handholding Tier 3 — guided eBay refresh-token minting
+**Labels:** feature, high, api, onboarding, spike
+**Milestone:** Phase 7 (usability)
+**Depends on:** Tier 1
+**Assignee:** human-gate
+
+The refresh token is the single hardest credential: it requires an authorization-code consent flow with an eBay RuName redirect — not hand-authorable. Two candidate designs need a spike decision first: (A) in-app flow — wizard generates the consent URL from the user's client ID + RuName, opens the browser, user pastes back the resulting authorization code, wizard exchanges it for a refresh token and saves it; (B) fully local redirect capture on localhost (requires the user's RuName to be configured with a localhost-style accepted URL — verify eBay sandbox/production rules before committing). Spike must resolve: RuName registration steps, sandbox vs production differences, code-expiry handling (~5 min), and error UX. Per Ground Rule 7, this spike requires a linked formalization issue before Done.
+
+### Acceptance Criteria
+- [ ] Spike report comparing A/B with eBay's current redirect rules verified against live docs.
+- [ ] Chosen design implemented: user completes consent in browser, wizard exchanges + saves the refresh token without hand-editing .env.
+- [ ] Failure paths (expired code, wrong RuName, denied consent) render human-readable guidance.
+
+## Issue: v2.0 planning — adopt closed-pricing-loop proposal and create session Issues
+**Labels:** planning, housekeeping
+**Milestone:** Phase 8 (v2.0)
+**Depends on:** None
+**Assignee:** human-gate
+
+`docs/proposals/v2.0_closed_pricing_loop_and_roadmap.md` specs the v2.0 flagship (closed pricing loop: sale outcomes → pricing prior → Margin-Guard, human-gated reprice) plus the sequenced 2.0 roadmap. On adoption: create Issues for Sessions A–E per the proposal's §4 breakdown (Session A is a `spike` requiring a linked formalization issue per Ground Rule 7), and route the §3 FMEA amendment draft through the human gate before Sessions B–E execute.
+
+### Acceptance Criteria
+- [ ] Proposal reviewed and adopted/amended by Alan.
+- [ ] Sessions A–E queued as Issues with the proposal as spec-of-record.
+- [ ] FMEA amendment approved before any implementation session runs.
